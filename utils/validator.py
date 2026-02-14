@@ -2,6 +2,8 @@
 from urllib.parse import urlparse
 import logging
 
+from src.config import DOMINIOS_PERMITIDOS
+
 # Instanciamos el auditor para este departamento
 logger = logging.getLogger(__name__)
 
