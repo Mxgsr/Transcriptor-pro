@@ -1,0 +1,10 @@
+# Entorno virtual
+venv/
+.venv/
+
+# Variables de entorno (¡La caja fuerte nunca se sube a internet!)
+.env
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
