@@ -8,3 +8,6 @@ venv/
 # Archivos de caché de Python
 __pycache__/
 *.pyc
+
+# Archivos de respaldo
+transcribe.py
