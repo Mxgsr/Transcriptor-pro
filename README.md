@@ -16,14 +16,14 @@ Este proyecto fue refactorizado siguiendo principios de arquitectura limpia, man
 
 1. **Clonar el repositorio:**
 ~~~ 
-   `git clone [https://github.com/Mxgsr/Transcriptor-pro.git](https://github.com/Mxgsr/Transcriptor-pro.git)`
-   `cd Transcriptor-pro`
+   git clone [https://github.com/Mxgsr/Transcriptor-pro.git](https://github.com/Mxgsr/Transcriptor-pro.git)
+   cd Transcriptor-pro
 ~~~ 
 
 2. Crear y activar el entorno virtual:
 ~~~ 
-`python3 -m venv venv`
-`source venv/bin/activate`
+python3 -m venv venv
+source venv/bin/activate
 ~~~ 
 
 3. Instalar dependencias:
@@ -35,8 +35,8 @@ _Nota: Requiere tener instalado ffmpeg en el sistema._
 4. Configurar variables de entorno:
 Crea un archivo .env en la raíz con el siguiente contenido:
 ```
-`DEFAULT_MODEL=medium`
-`DOWNLOAD_DIR=downloads`
+DEFAULT_MODEL=medium
+DOWNLOAD_DIR=downloads
 ```
 🚀 Uso
 Puedes ejecutar el programa directamente con Python:
