@@ -42,11 +42,7 @@ DOWNLOAD_DIR=downloads
 Puedes ejecutar el programa directamente con Python:
 ```
 python main.py "URL_O_RUTA_ARCHIVO" --model tiny
-Comandos Globales
-Si configuraste el alias en tu sistema:
 ```
-
-transcribe "[https://youtu.be/](https://youtu.be/)..." --model base
 
 📂 Estructura del Proyecto
 `src/`: Lógica central (descarga, transcripción, configuración).
