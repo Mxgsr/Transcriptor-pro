@@ -28,7 +28,7 @@ source venv/bin/activate
 
 3. Instalar dependencias:
 ~~~ 
-pip install openai-whisper yt-dlp python-dotenv
+pip install -r requirements.txt
 ~~~
 _Nota: Requiere tener instalado ffmpeg en el sistema._
 
