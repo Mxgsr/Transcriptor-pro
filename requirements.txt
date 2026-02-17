@@ -1,1 +1,14 @@
+# Manejo de variables de entorno
 python-dotenv==1.2.1
+
+# El motor de transcripción (OpenAI Whisper)
+openai-whisper
+
+# Para descargar audio de YouTube y otras plataformas
+yt-dlp
+
+# Dependencia necesaria para que Whisper maneje tensores (Machine Learning)
+torch
+
+# Wrapper para interactuar con FFmpeg desde Python
+ffmpeg-python

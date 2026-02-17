@@ -23,7 +23,6 @@ def procesar_entrada(entrada: str, modelo: str):
     # PASO 1: Obtener la ruta local del archivo de audio
     if es_url(entrada):
         logger.info(f"Detectada URL. Iniciando descarga de: {entrada}")
-        # TODO 1: Llama a la función 'descargar_audio' pasándole la variable 'entrada'.
         # Esto ejecutará yt-dlp y nos devolverá la ruta del archivo descargado.
         audio_path = descargar_audio(entrada)
     else:
@@ -33,7 +32,6 @@ def procesar_entrada(entrada: str, modelo: str):
 
     # PASO 2: Procesar el audio con Whisper
     logger.info(f"Iniciando transcripción con el modelo: {modelo}")
-    # TODO 2: Llama a 'transcribir_audio' pasándole 'audio_path' y model_name=modelo.
     # Esto cargará el modelo en memoria y devolverá la lista de diccionarios.
     segmentos = transcribir_audio(audio_path, model_name=modelo)
     
@@ -47,10 +45,9 @@ def procesar_entrada(entrada: str, modelo: str):
     srt_path = audio_path.with_suffix(".blocks.srt")
 
     logger.info("Guardando los archivos finales...")
-    # TODO 3: Llama a 'guardar_txt_con_timestamps' pasándole las variables 'parrafos' y 'txt_path'
+
     guardar_txt_con_timestamps(parrafos, txt_path)
     
-    # TODO 4: Llama a 'guardar_srt' pasándole las variables 'parrafos' y 'srt_path'
     guardar_srt(parrafos, srt_path)
     
     logger.info("Proceso completado con éxito.")
