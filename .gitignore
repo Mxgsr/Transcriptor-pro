@@ -11,3 +11,9 @@ __pycache__/
 
 # Archivos de respaldo
 transcribe.py
+
+# Archivos de sistema de macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+**/._*
