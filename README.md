@@ -44,12 +44,22 @@ Puedes ejecutar el programa directamente con Python:
 python main.py "URL_O_RUTA_ARCHIVO" --model tiny
 ```
 
+🧪 Tests
+Los tests simulan Whisper y yt-dlp, así que corren en segundos sin red ni modelos:
+```
+pip install -r requirements-dev.txt
+python -m pytest
+```
+GitHub Actions los ejecuta en cada push y pull request.
+
 📂 Estructura del Proyecto
 `src/`: Lógica central (descarga, transcripción, configuración).
 
 `utils/`: Validadores y formateadores de texto.
 
 `downloads/`: Carpeta por defecto para archivos procesados.
+
+`tests/`: Tests con pytest.
 
 `main.py`: Punto de entrada principal y orquestador.
 

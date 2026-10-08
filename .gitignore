@@ -17,3 +17,5 @@ transcribe.py
 .AppleDouble
 .LSOverride
 **/._*
+# Caché de pytest
+.pytest_cache/

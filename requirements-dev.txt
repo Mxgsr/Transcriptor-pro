@@ -1,0 +1,4 @@
+# Dependencias para ejecutar los tests.
+# Whisper, torch y yt-dlp se simulan (mock) en los tests, así que no hacen falta aquí.
+python-dotenv==1.2.1
+pytest
