@@ -46,7 +46,10 @@ def transcribir_audio(audio_path: Path, model_name: str, language: str = "es") -
     return segments
 
 def agrupar_segmentos_en_parrafos(segments: list, pause_threshold: float = 2.0, max_chars: int = 600, min_chars_for_pause_break: int = 150) -> list:
-    """Agrupa los segmentos de Whisper en párrafos legibles basados en pausas y longitud."""
+    """
+    Agrupa los segmentos de Whisper en párrafos legibles basados en pausas y longitud.
+    Si los segmentos traen "speaker" (diarización), también corta cuando cambia el hablante.
+    """
     if not segments:
         return []
 
@@ -54,6 +57,7 @@ def agrupar_segmentos_en_parrafos(segments: list, pause_threshold: float = 2.0, 
     current_start = segments[0]["start"]
     current_end = segments[0]["end"]
     current_texts = [segments[0]["text"].strip()]
+    current_speaker = segments[0].get("speaker")
 
     def current_text():
         return " ".join(t for t in current_texts if t)
@@ -71,13 +75,11 @@ def agrupar_segmentos_en_parrafos(segments: list, pause_threshold: float = 2.0, 
 
         corte_por_pausa = gap >= pause_threshold and largo_actual >= min_chars_for_pause_break
         corte_por_largo = largo_actual >= max_chars and termina_en_punto
+        corte_por_hablante = seg.get("speaker") != current_speaker
 
-        if corte_por_pausa or corte_por_largo:
-            parrafos.append({
-                "start": current_start,
-                "end": current_end,
-                "text": texto_actual
-            })
+        if corte_por_pausa or corte_por_largo or corte_por_hablante:
+            parrafos.append(_nuevo_parrafo(current_start, current_end, texto_actual, current_speaker))
+            current_speaker = seg.get("speaker")
             current_start = seg_start
             current_end = seg_end
             current_texts = [seg_text] if seg_text else []
@@ -88,10 +90,12 @@ def agrupar_segmentos_en_parrafos(segments: list, pause_threshold: float = 2.0, 
 
     texto_final = current_text()
     if texto_final:
-        parrafos.append({
-            "start": current_start,
-            "end": current_end,
-            "text": texto_final
-        })
+        parrafos.append(_nuevo_parrafo(current_start, current_end, texto_final, current_speaker))
 
     return parrafos
+
+def _nuevo_parrafo(start: float, end: float, text: str, speaker) -> dict:
+    parrafo = {"start": start, "end": end, "text": text}
+    if speaker is not None:
+        parrafo["speaker"] = speaker
+    return parrafo

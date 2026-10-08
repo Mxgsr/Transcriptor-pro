@@ -33,3 +33,8 @@ if not DOWNLOAD_DIR:
 # Si por algún motivo no existe en el .env, le damos una lista básica de emergencia.
 dominios = os.getenv("DOMINIOS_PERMITIDOS", "youtube.com,youtu.be")
 DOMINIOS_PERMITIDOS = [dominio.strip().lower() for dominio in dominios.split(",")]
+
+# 6. Diarización (identificar hablantes)
+# El token de Hugging Face es un secreto: vive solo en el .env.
+HF_TOKEN = os.getenv("HF_TOKEN")
+DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
