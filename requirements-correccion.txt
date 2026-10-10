@@ -1,0 +1,5 @@
+# Dependencias opcionales para corregir transcripciones con IA local (transcriptor corregir)
+-r requirements.txt
+
+# Modelos de lenguaje sobre MLX (solo Mac con Apple Silicon)
+mlx-lm

@@ -1,0 +1,5 @@
+# Dependencias opcionales para identificar hablantes (--diarizar)
+-r requirements.txt
+
+# Motor de diarización (requiere token de Hugging Face, ver README)
+pyannote.audio>=4.0

@@ -1,0 +1,29 @@
+# Permite instalar el proyecto y usar el comando `transcriptor` (ver README).
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "transcriptor-pro"
+version = "0.1.0"
+description = "Transcribe audio y video (YouTube o archivos locales) con Whisper sobre MLX."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-dotenv==1.2.1",
+    "mlx-whisper",
+    "yt-dlp",
+    "ffmpeg-python",
+    "typer>=0.12",
+    "questionary>=2.0",
+]
+
+[project.optional-dependencies]
+diarizacion = ["pyannote.audio>=4.0"]
+correccion = ["mlx-lm"]
+
+[project.scripts]
+transcriptor = "src.cli:app"
+
+[tool.setuptools]
+packages = ["src", "utils"]

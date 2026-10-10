@@ -1,20 +1,12 @@
 # src/config.py
 import os
-import logging
 from dotenv import load_dotenv
 
 # 1. Cargamos la caja fuerte (.env)
 load_dotenv()
 
 # 2. Configuración de Auditoría (Logging)
-def setup_logger():
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-
-setup_logger()
-logger = logging.getLogger(__name__)
+# La configura la CLI (src/cli.py) al arrancar, según se pida o no el detalle (-v).
 
 # 3. Variables Globales (PEP 8: Constantes siempre en MAYÚSCULAS)
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "downloads")
@@ -33,3 +25,14 @@ if not DOWNLOAD_DIR:
 # Si por algún motivo no existe en el .env, le damos una lista básica de emergencia.
 dominios = os.getenv("DOMINIOS_PERMITIDOS", "youtube.com,youtu.be")
 DOMINIOS_PERMITIDOS = [dominio.strip().lower() for dominio in dominios.split(",")]
+
+# 6. Diarización (identificar hablantes)
+# El token de Hugging Face es un secreto: vive solo en el .env.
+HF_TOKEN = os.getenv("HF_TOKEN")
+DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
+# Dónde corre la diarización: auto (GPU del Mac si está disponible), mps, cuda o cpu
+DIARIZATION_DEVICE = os.getenv("DIARIZATION_DEVICE", "auto")
+
+# 7. Corrección con IA local (transcriptor corregir)
+# Nombre corto (qwen3-4b, qwen3-8b, gemma4-e4b) o un repo de mlx-community en Hugging Face
+CORRECTOR_MODEL = os.getenv("CORRECTOR_MODEL", "qwen3-8b")

@@ -1,14 +1,17 @@
 # Manejo de variables de entorno
 python-dotenv==1.2.1
 
-# El motor de transcripción (OpenAI Whisper)
-openai-whisper
+# El motor de transcripción (Whisper sobre MLX, solo Mac con Apple Silicon)
+mlx-whisper
 
 # Para descargar audio de YouTube y otras plataformas
 yt-dlp
 
-# Dependencia necesaria para que Whisper maneje tensores (Machine Learning)
-torch
-
 # Wrapper para interactuar con FFmpeg desde Python
 ffmpeg-python
+
+# Interfaz de línea de comandos (trae Rich para colores y barras de progreso)
+typer>=0.12
+
+# Menú con flechas (al escribir `transcriptor` sin nada más)
+questionary>=2.0
