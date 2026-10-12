@@ -76,3 +76,13 @@ def test_reproductor_detiene_lo_anterior(monkeypatch, tmp_path):
 
     assert [cmd for cmd, _ in procesos] == [["afplay", str(tmp_path / "1.wav")], ["afplay", str(tmp_path / "2.wav")]]
     assert all(p.terminate.called for _, p in procesos)
+
+
+def test_comando_reproductor_en_windows_usa_winsound(monkeypatch):
+    monkeypatch.setattr(fragmentos.shutil, "which", lambda c: None)
+    monkeypatch.setattr(fragmentos.sys, "platform", "win32")
+
+    comando = fragmentos.comando_reproductor()
+
+    assert comando[0] == fragmentos.sys.executable
+    assert "winsound" in comando[-1]

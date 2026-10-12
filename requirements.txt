@@ -1,14 +1,18 @@
 # Manejo de variables de entorno
 python-dotenv==1.2.1
 
-# El motor de transcripción (Whisper sobre MLX, solo Mac con Apple Silicon)
-mlx-whisper
+# El motor de transcripción: Whisper sobre MLX en Mac con chip Apple; faster-whisper en el resto
+mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'
+faster-whisper>=1.1; sys_platform != 'darwin' or platform_machine != 'arm64'
 
 # Para descargar audio de YouTube y otras plataformas
 yt-dlp
 
 # Wrapper para interactuar con FFmpeg desde Python
 ffmpeg-python
+
+# Un ffmpeg listo para usar, por si el computador no lo tiene instalado
+imageio-ffmpeg>=0.5
 
 # Interfaz de línea de comandos (trae Rich para colores y barras de progreso)
 typer>=0.12

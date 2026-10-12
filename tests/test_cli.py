@@ -385,8 +385,9 @@ def modelo_falso(monkeypatch):
 
     registro = {"repo": None, "respuestas": {}}
 
-    def cargar(repo, silencioso=True):
+    def cargar(repo, silencioso=True, vocabulario=""):
         registro["repo"] = repo
+        registro["vocabulario"] = vocabulario
         return lambda texto, contexto: registro["respuestas"].get(texto, texto)
 
     monkeypatch.setattr(corrector, "cargar_generador", cargar)
@@ -420,7 +421,7 @@ def test_corregir_quita_las_repeticiones_antes_de_la_ia(tmp_path, modelo_falso, 
     guardar_json([{"start": 0, "end": 30, "text": bucle, "speaker": "Hablante 1"}], json_path)
     vistos = []
     monkeypatch.setattr(corrector, "cargar_generador",
-                        lambda repo, silencioso=True: lambda texto, contexto: vistos.append(texto) or texto)
+                        lambda repo, silencioso=True, vocabulario="": lambda texto, contexto: vistos.append(texto) or texto)
 
     resultado = runner.invoke(app, ["corregir", str(json_path)])
 
@@ -494,7 +495,7 @@ def test_corregir_interrumpido_guarda_lo_hecho(tmp_path, modelo_falso, monkeypat
 
     _, json_path = _transcripcion_diarizada(tmp_path)
 
-    def cargar(repo, silencioso=True):
+    def cargar(repo, silencioso=True, vocabulario=""):
         respuestas = iter(["¡Bienvenidos al programa!"])
 
         def generar(texto, contexto):
@@ -586,3 +587,40 @@ def test_las_opciones_ganan_a_la_configuracion(procesar, tmp_path):
     assert resultado.exit_code == 0, resultado.output
     args, kwargs = procesar.call_args
     assert (args[1], kwargs["idioma"], kwargs["salida"]) == ("tiny", "pt", tmp_path / "otra")
+
+
+def test_corregir_usa_el_vocabulario(tmp_path, modelo_falso):
+    from src import ajustes
+    _, json_path = _transcripcion_diarizada(tmp_path)
+    ajustes.guardar(vocabulario="FOSIS")
+
+    resultado = runner.invoke(app, ["corregir", str(json_path)])
+    assert resultado.exit_code == 0, resultado.output
+    assert modelo_falso["vocabulario"] == "FOSIS"
+    assert "Vocabulario: FOSIS" in resultado.output
+
+    resultado = runner.invoke(app, ["corregir", str(json_path), "--vocabulario", "COSAM ;OSL,, cosam"])
+    assert resultado.exit_code == 0, resultado.output
+    assert modelo_falso["vocabulario"] == "COSAM, OSL"
+
+    # Vacío: sin vocabulario esta vez, aunque haya uno en la configuración
+    resultado = runner.invoke(app, ["corregir", str(json_path), "--vocabulario", ""])
+    assert resultado.exit_code == 0, resultado.output
+    assert modelo_falso["vocabulario"] == ""
+
+
+def test_corregir_arregla_los_nombres_del_vocabulario_sin_ia(tmp_path, modelo_falso):
+    from utils.formatters import guardar_json
+    json_path = tmp_path / "charla.blocks.json"
+    guardar_json([
+        {"start": 0, "end": 30, "text": "Ahora voy a Cozán, y con la suyenta Catalina.", "speaker": "Hablante 1"},
+        {"start": 30, "end": 35, "text": "Qué bien.", "speaker": "Hablante 2"},
+    ], json_path, audio=None)
+
+    resultado = runner.invoke(app, ["corregir", str(json_path), "--vocabulario", "COSAM, señorita Catalina"])
+    assert resultado.exit_code == 0, resultado.output
+    assert "2 nombres corregidos" in resultado.output
+    corregido = json.loads((tmp_path / "charla.corregido.blocks.json").read_text(encoding="utf-8"))
+    primero = corregido["parrafos"][0]
+    assert primero["text"] == "Ahora voy a COSAM, y con la señorita Catalina."
+    assert primero["texto_original"] == "Ahora voy a Cozán, y con la suyenta Catalina."

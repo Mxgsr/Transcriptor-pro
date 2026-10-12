@@ -22,6 +22,8 @@ def _de_fabrica() -> dict:
         "carpeta_salida": None,  # junto al audio
         "modo_hablantes": PREGUNTAR,
         "modo_correccion": PREGUNTAR,
+        # Nombres y siglas que la corrección debe escribir bien ("COSAM, OSL, señorita Catalina")
+        "vocabulario": "",
     }
 
 

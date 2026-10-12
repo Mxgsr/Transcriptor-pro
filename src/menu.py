@@ -2,6 +2,7 @@
 # Menú con flechas que se abre al escribir `transcriptor` sin nada más.
 # Aquí solo se hacen preguntas: el trabajo lo hacen los mismos comandos de src/cli.py.
 import importlib.util
+import os
 import re
 import shutil
 import subprocess
@@ -17,7 +18,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
-from src import ajustes, cli, historial
+from src import ajustes, cli, historial, plataforma
 from src.diarizer import parsear_nombres
 from utils.validators import es_url
 
@@ -65,6 +66,8 @@ MAX_EN_LISTA = 15
 
 INSTALAR_DIARIZACION = 'uv pip install -e ".[diarizacion]"'
 INSTALAR_CORRECCION = 'uv pip install -e ".[correccion]"'
+
+NOMBRE_MOSTRAR_EN_CARPETA = {"darwin": "Mostrar en Finder", "win32": "Mostrar en el Explorador"}
 
 
 # --- Preguntas --------------------------------------------------------------
@@ -207,13 +210,15 @@ def flujo_transcribir():
     instalado_hablantes, instalado_ia = _instalado("pyannote.audio"), _instalado("mlx_lm")
     modo_hablantes, modo_correccion = ajustes.valor("modo_hablantes"), ajustes.valor("modo_correccion")
     if not instalado_hablantes and modo_hablantes != ajustes.NUNCA:
-        consola.print(f"[dim]Para identificar hablantes, instala: {escape(INSTALAR_DIARIZACION)}[/]")
+        consola.print(f"[dim]{escape(_falta_diarizacion('Para identificar hablantes, instala: '))}[/]")
 
     # Las respuestas: al volver atrás, cada pregunta ofrece lo que ya se había respondido.
-    # Idioma y carpeta salen de Configuración; "Más opciones…" los cambia solo para esta vez.
+    # Idioma, carpeta y vocabulario (para la corrección) salen de Configuración;
+    # "Más opciones…" los cambia solo para esta vez.
     r = {"origen": prefs.get("origen"), "archivo": "", "enlace": "", "modelo": ajustes.valor("modelo"),
          "hablantes": False, "cuantos": None, "corregir": False,
-         "idioma": ajustes.valor("idioma"), "salida": ajustes.carpeta("carpeta_salida")}
+         "idioma": ajustes.valor("idioma"), "salida": ajustes.carpeta("carpeta_salida"),
+         "vocabulario": ajustes.valor("vocabulario")}
 
     def origen():
         r["origen"] = elegir("¿De dónde viene?", [
@@ -256,16 +261,21 @@ def flujo_transcribir():
     def empezar():
         while True:
             consola.print(_resumen_transcribir(_entrada(r), r["modelo"], r["hablantes"], r["cuantos"],
-                                               r["corregir"], r["idioma"], r["salida"]))
+                                               r["corregir"], r["idioma"], r["salida"],
+                                               r["vocabulario"] if r["corregir"] else ""))
             decision = elegir("¿Empiezo?", [
                 ("Sí, empezar", "empezar"),
-                ("Más opciones… (idioma, carpeta donde guardar)", "mas"),
+                ("Más opciones… (idioma, vocabulario, carpeta donde guardar)" if r["corregir"]
+                 else "Más opciones… (idioma, carpeta donde guardar)", "mas"),
                 ("Cancelar", "cancelar"),
             ])
             if decision != "mas":
                 r["decision"] = decision
                 return
-            r["idioma"], r["salida"] = _mas_opciones(r["idioma"], r["salida"])
+            vocabulario = r["vocabulario"] if r["corregir"] else None  # sin corregir no sirve
+            r["idioma"], r["salida"], vocabulario = _mas_opciones(r["idioma"], r["salida"], vocabulario)
+            if vocabulario is not None:
+                r["vocabulario"] = vocabulario
 
     seguir_pasos([origen, entrada, modelo, hablantes, cuantos, corregir, empezar])
     if r["decision"] == "cancelar":
@@ -289,7 +299,7 @@ def flujo_transcribir():
 
     if r["corregir"]:
         _ejecutar(cli.corregir, archivo=resultado.json_path or resultado.txt_path,
-                  modelo=ajustes.valor("modelo_corrector"))
+                  modelo=ajustes.valor("modelo_corrector"), vocabulario=r["vocabulario"])
     return acciones_sobre(resultado.txt_path, resultado.json_path, "¿Y ahora?")
 
 
@@ -306,7 +316,7 @@ def numero_de_hablantes(cuantos: Optional[str]) -> tuple:
     return (None, numero) if "más" in cuantos else (numero, None)
 
 
-def _resumen_transcribir(entrada, modelo, hablantes, cuantos, corregir, idioma, salida) -> Text:
+def _resumen_transcribir(entrada, modelo, hablantes, cuantos, corregir, idioma, salida, vocabulario="") -> Text:
     nombre = entrada if es_url(entrada) else Path(entrada).name
     resumen = Text("\nVoy a transcribir ")
     resumen.append(nombre, style="bold")
@@ -321,30 +331,51 @@ def _resumen_transcribir(entrada, modelo, hablantes, cuantos, corregir, idioma, 
             resumen.append(", identificando quién habla")
     resumen.append(", y luego corregir" if corregir else "")
     resumen.append(".")
+    if vocabulario:
+        resumen.append(f" Vocabulario para corregir: {vocabulario}.")
     if salida:
         resumen.append(f" Lo guardo en {corta(salida)}.")
     return resumen
 
 
-def _mas_opciones(idioma: str, salida: Optional[Path]) -> tuple:
-    """Idioma y carpeta de salida para esta transcripción. "← Volver" regresa a ¿Empiezo?."""
+def _mas_opciones(idioma: str, salida: Optional[Path], vocabulario: Optional[str] = None) -> tuple:
+    """
+    Idioma, carpeta de salida y vocabulario para esta transcripción. "← Volver" regresa a ¿Empiezo?.
+    El vocabulario solo sirve para corregir: con vocabulario=None no se ofrece.
+    """
     while True:
+        opciones = [(f"Idioma: {_nombre_idioma(idioma)}", "idioma")]
+        if vocabulario is not None:
+            opciones.append((f"Vocabulario para corregir: {_texto_vocabulario(vocabulario)}", "vocabulario"))
+        opciones.append((f"Carpeta donde guardar: {corta(salida) if salida else 'junto al audio'}", "carpeta"))
         try:
-            opcion = elegir("¿Qué quieres cambiar?", [
-                (f"Idioma: {_nombre_idioma(idioma)}", "idioma"),
-                (f"Carpeta donde guardar: {corta(salida) if salida else 'junto al audio'}", "carpeta"),
-            ])
+            opcion = elegir("¿Qué quieres cambiar?", opciones)
         except (Atras, KeyboardInterrupt, EOFError):
-            return idioma, salida
+            return idioma, salida, vocabulario
         try:
             if opcion == "idioma":
                 idioma = preguntar_idioma("¿En qué idioma está el audio?", idioma)
+            elif opcion == "vocabulario":
+                vocabulario = preguntar_vocabulario(vocabulario)
             else:
                 elegida = ruta("Carpeta donde guardar (vacío: junto al audio):", validar=_validar_carpeta,
                                solo_carpetas=True, defecto=_para_escribir(salida)).strip()
                 salida = limpiar_ruta(elegida) if elegida else None
         except (Atras, KeyboardInterrupt, EOFError):
             consola.print()
+
+
+def preguntar_vocabulario(actual: str) -> str:
+    """Nombres y siglas que la corrección debe escribir bien. Vacío: ninguno."""
+    consola.print("[dim]Escribe los nombres, siglas o palabras raras que se dicen en el audio, separados por "
+                  "comas. Al corregir, la IA los usará para escribirlos bien.[/]")
+    return texto("Vocabulario (vacío: ninguno):", defecto=actual).strip()
+
+
+def _texto_vocabulario(vocabulario: str, largo: int = 40) -> str:
+    if not vocabulario:
+        return "ninguno"
+    return vocabulario if len(vocabulario) <= largo else vocabulario[:largo - 1].rstrip(" ,") + "…"
 
 
 def preguntar_idioma(mensaje: str, actual: str) -> str:
@@ -391,7 +422,7 @@ def corregir_archivo(archivo: Path) -> Optional[Path]:
     Volver atrás en la primera pregunta lanza Atras.
     """
     if not _instalado("mlx_lm"):
-        _avisar(f"Para corregir con IA falta mlx-lm. Instálalo con:\n{INSTALAR_CORRECCION}")
+        _avisar(_falta_correccion("Para corregir con IA falta mlx-lm. Instálalo con:\n"))
         return None
     prefs = historial.preferencias()
     r = {"modelo": ajustes.valor("modelo_corrector"), "revisar": prefs.get("revisar", False)}
@@ -510,6 +541,7 @@ def _elegir_ajuste(mensaje: str, salida: Optional[Path]) -> str:
         (f"Idioma: {_nombre_idioma(ajustes.valor('idioma'))}", "idioma"),
         (f"Modelo de transcripción: {ajustes.valor('modelo')}", "modelo"),
         (f"Modelo de IA para corregir: {ajustes.valor('modelo_corrector')}", "modelo_corrector"),
+        (f"Vocabulario para corregir: {_texto_vocabulario(ajustes.valor('vocabulario'))}", "vocabulario"),
         (f"Identificar hablantes: {_nombre_modo(ajustes.valor('modo_hablantes'))}", "modo_hablantes"),
         (f"Corregir al terminar: {_nombre_modo(ajustes.valor('modo_correccion'))}", "modo_correccion"),
         (f"Carpeta de descargas: {_texto_descargas()}", "carpeta_descargas"),
@@ -524,6 +556,8 @@ def _cambiar_ajuste(clave: str):
         return preguntar_idioma("Idioma por defecto del audio:", actual)
     if clave == "modelo":
         return elegir("Modelo de transcripción por defecto:", _opciones_con_descripcion(MODELOS_WHISPER, actual), actual)
+    if clave == "vocabulario":
+        return preguntar_vocabulario(actual)
     if clave == "modelo_corrector":
         return elegir("Modelo de IA para corregir:", _opciones_con_descripcion(MODELOS_IA, actual), actual)
     if clave == "modo_hablantes":
@@ -554,9 +588,9 @@ def _cambiar_ajuste(clave: str):
 
 def _avisar_si_falta(clave: str, valor):
     if clave == "modo_hablantes" and valor != ajustes.NUNCA and not _instalado("pyannote.audio"):
-        consola.print(f"[yellow]Para identificar hablantes falta instalar: {escape(INSTALAR_DIARIZACION)}[/]")
+        consola.print(f"[yellow]{escape(_falta_diarizacion('Para identificar hablantes falta instalar: '))}[/]")
     if clave in ("modo_correccion", "modelo_corrector") and valor != ajustes.NUNCA and not _instalado("mlx_lm"):
-        consola.print(f"[yellow]Para corregir con IA falta instalar: {escape(INSTALAR_CORRECCION)}[/]")
+        consola.print(f"[yellow]{escape(_falta_correccion('Para corregir con IA falta instalar: '))}[/]")
 
 
 def _nombre_modo(modo: str) -> str:
@@ -622,7 +656,7 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
         if json_path:
             opciones.append(("Cambiar nombres de hablantes", "nombres"))
         opciones += [
-            ("Mostrar en Finder" if sys.platform == "darwin" else "Mostrar en su carpeta", "carpeta"),
+            (NOMBRE_MOSTRAR_EN_CARPETA.get(sys.platform, "Mostrar en su carpeta"), "carpeta"),
             ("Volver al menú", "menu"),
             ("Salir", "salir"),
         ]
@@ -697,6 +731,12 @@ def abrir(archivo: Path, revelar: bool = False):
     """Abre el archivo con su programa (o muestra dónde está, con revelar)."""
     if sys.platform == "darwin":
         comando = ["open", "-R", str(archivo)] if revelar else ["open", str(archivo)]
+    elif sys.platform == "win32":
+        if not revelar:
+            os.startfile(str(archivo))
+            return
+        # explorer quiere la ruta pegada a /select, entre comillas (por los espacios)
+        comando = f'explorer /select,"{archivo}"'
     elif shutil.which("xdg-open"):
         comando = ["xdg-open", str(archivo.parent if revelar else archivo)]
     else:
@@ -723,6 +763,20 @@ def _ejecutar(comando, **opciones):
 
 def _avisar(mensaje: str):
     cli.consola_err.print(Panel(Text(mensaje), border_style="yellow", expand=False))
+
+
+def _falta_diarizacion(como_instalar: str) -> str:
+    """Cómo instalar la diarización, o por qué no se puede en este computador."""
+    if not plataforma.hablantes_disponible():
+        return plataforma.SIN_HABLANTES
+    return como_instalar + INSTALAR_DIARIZACION
+
+
+def _falta_correccion(como_instalar: str) -> str:
+    """Cómo instalar la corrección con IA, o por qué no se puede en este computador."""
+    if not plataforma.correccion_disponible():
+        return plataforma.SIN_CORRECCION
+    return como_instalar + INSTALAR_CORRECCION
 
 
 def _instalado(modulo: str) -> bool:
@@ -760,11 +814,12 @@ def limpiar_ruta(texto: str) -> Path:
     """
     Acepta rutas escritas o arrastradas a la terminal: "entre comillas" o con los espacios
     escapados como hace la Terminal del Mac (Mi\\ audio.m4a).
+    En Windows la \\ separa carpetas (C:\\Users\\...), así que ahí no se toca.
     """
     texto = texto.strip()
     if len(texto) >= 2 and texto[0] == texto[-1] and texto[0] in "'\"":
         texto = texto[1:-1]
-    else:
+    elif sys.platform != "win32":
         texto = re.sub(r"\\(.)", r"\1", texto)
     return Path(texto).expanduser()
 

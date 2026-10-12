@@ -1,7 +1,11 @@
 # Ubicación: tests/test_transcriber.py
+import sys
+import types
+from types import SimpleNamespace
+
 import pytest
 
-from src.transcriber import agrupar_segmentos_en_parrafos, resolver_modelo, transcribir_audio
+from src.transcriber import AJUSTES_CONTRA_BUCLES, agrupar_segmentos_en_parrafos, resolver_modelo, transcribir_audio
 
 
 def seg(start, end, text):
@@ -215,3 +219,114 @@ def test_transcribir_propaga_error_del_motor(tmp_path, mlx_transcribe):
 
     with pytest.raises(RuntimeError, match="fallo"):
         transcribir_audio(audio, model_name="tiny")
+
+
+# --- faster-whisper (Windows, Linux y Macs con Intel) ---
+
+class _FasterWhisperFalso:
+    """Imita faster_whisper.WhisperModel: transcribe() da un generador de segmentos y la info."""
+
+    def __init__(self, segmentos, duracion):
+        self.segmentos, self.duracion = segmentos, duracion
+        self.creado_con, self.transcrito_con = None, None
+
+    def modulo(self):
+        falso = self
+
+        class WhisperModel:
+            def __init__(self, modelo, **kwargs):
+                falso.creado_con = (modelo, kwargs)
+
+            def transcribe(self, audio, **kwargs):
+                falso.transcrito_con = (audio, kwargs)
+                return iter(falso.segmentos), SimpleNamespace(duration=falso.duracion)
+
+        return SimpleNamespace(WhisperModel=WhisperModel)
+
+
+@pytest.fixture
+def faster(monkeypatch):
+    """Sin mlx-whisper (como en Windows): el motor es faster-whisper, simulado."""
+    import src.transcriber as transcriber
+
+    palabras = [SimpleNamespace(word=" Hola", start=0.0, end=0.5, probability=0.9),
+                SimpleNamespace(word=" mundo.", start=0.5, end=1.0, probability=0.8)]
+    falso = _FasterWhisperFalso(
+        [SimpleNamespace(start=0.0, end=1.0, text=" Hola mundo.", words=palabras),
+         SimpleNamespace(start=1.5, end=2.5, text=" Chao.", words=None)],
+        duracion=3.0,
+    )
+    monkeypatch.setattr(transcriber, "mlx_whisper", None)
+    monkeypatch.setitem(sys.modules, "faster_whisper", falso.modulo())
+    return falso
+
+
+def test_sin_mlx_el_motor_es_faster_whisper(faster):
+    import src.transcriber as transcriber
+
+    assert transcriber.motor() == transcriber.MOTOR_FASTER
+
+
+@pytest.mark.parametrize("nombre,modelo", [("turbo", "turbo"), ("large", "large-v3"), ("small", "small"),
+                                           ("Systran/faster-whisper-small", "Systran/faster-whisper-small")])
+def test_resolver_modelo_con_faster_whisper(faster, nombre, modelo):
+    assert resolver_modelo(nombre) == modelo
+
+
+def test_faster_whisper_devuelve_segmentos_como_mlx(tmp_path, faster):
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"")
+
+    segmentos = transcribir_audio(audio, model_name="large", language="en")
+
+    assert segmentos == [
+        {"start": 0.0, "end": 1.0, "text": " Hola mundo.", "words": [
+            {"word": " Hola", "start": 0.0, "end": 0.5, "probability": 0.9},
+            {"word": " mundo.", "start": 0.5, "end": 1.0, "probability": 0.8},
+        ]},
+        {"start": 1.5, "end": 2.5, "text": " Chao."},
+    ]
+    assert faster.creado_con == ("large-v3", {"device": "cpu", "compute_type": "int8"})
+    ruta, opciones = faster.transcrito_con
+    assert ruta == str(audio)
+    assert opciones == {"language": "en", **AJUSTES_CONTRA_BUCLES}
+
+
+def test_faster_whisper_informa_el_progreso_y_recibe_opciones_extra(tmp_path, faster):
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"")
+    avances = []
+
+    transcribir_audio(audio, model_name="tiny", progreso=lambda n, total, unidad: avances.append((n, total, unidad)),
+                      opciones={"initial_prompt": "COSAM, FOSIS"})
+
+    assert avances == [(0, 3.0, "audio"), (1.0, 3.0, "audio"), (2.5, 3.0, "audio"), (3.0, 3.0, "audio")]
+    assert faster.transcrito_con[1]["initial_prompt"] == "COSAM, FOSIS"
+
+
+def test_las_opciones_extra_tambien_llegan_a_mlx(tmp_path, mlx_transcribe):
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"")
+    mlx_transcribe.return_value = {"segments": [{"start": 0.0, "end": 1.0, "text": "Hola"}]}
+
+    transcribir_audio(audio, model_name="tiny", opciones={"initial_prompt": "COSAM"})
+
+    assert mlx_transcribe.call_args.kwargs["initial_prompt"] == "COSAM"
+    assert mlx_transcribe.call_args.kwargs["word_timestamps"] is True
+
+
+def test_cargar_audio_con_faster_whisper(tmp_path, monkeypatch):
+    import numpy as np
+    import src.transcriber as transcriber
+
+    llamadas = []
+    audio_falso = types.ModuleType("faster_whisper.audio")
+    audio_falso.decode_audio = lambda ruta, sampling_rate: llamadas.append((ruta, sampling_rate)) or [0.0, 0.5]
+    monkeypatch.setattr(transcriber, "mlx_whisper", None)
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.ModuleType("faster_whisper"))
+    monkeypatch.setitem(sys.modules, "faster_whisper.audio", audio_falso)
+
+    onda = transcriber.cargar_audio(tmp_path / "a.mp3")
+
+    assert llamadas == [(str(tmp_path / "a.mp3"), 16000)]
+    assert onda.dtype == np.float32 and onda.tolist() == [0.0, 0.5]

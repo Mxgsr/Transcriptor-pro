@@ -5,6 +5,8 @@ import logging
 import os
 from pathlib import Path
 
+from src import plataforma
+
 logger = logging.getLogger(__name__)
 
 ETIQUETA_GENERICA = "Hablante"
@@ -60,8 +62,8 @@ def cargar_pipeline(hf_token: str, modelo: str, dispositivo: str = "auto"):
     # 1. Filtro de entrada: sin token no hay descarga del modelo
     if not hf_token:
         raise ValueError(
-            "Falta HF_TOKEN en el archivo .env. La diarización necesita un token de Hugging Face "
-            "(ver README, sección Diarización)."
+            "Falta HF_TOKEN en el archivo .env (el del proyecto o ~/.transcriptor/.env). "
+            "La diarización necesita un token de Hugging Face (ver README, sección Diarización)."
         )
 
     # Si alguna operación no existe en la GPU del Mac (MPS), torch la hace en CPU en vez de fallar.
@@ -72,6 +74,8 @@ def cargar_pipeline(hf_token: str, modelo: str, dispositivo: str = "auto"):
     try:
         from pyannote.audio import Pipeline
     except ImportError as e:
+        if not plataforma.hablantes_disponible():
+            raise ImportError(plataforma.SIN_HABLANTES) from e
         raise ImportError(
             "pyannote.audio no está instalado. Ejecuta: pip install -r requirements-diarizacion.txt"
         ) from e
@@ -119,14 +123,12 @@ def diarizar_audio(pipeline, audio_path: Path, num_hablantes: int = None,
     if not audio_path.exists():
         raise FileNotFoundError(f"No se encontró el audio en: {audio_path}")
 
-    import numpy as np
     import torch
-    from mlx_whisper.audio import load_audio, SAMPLE_RATE
+    from src.transcriber import SAMPLE_RATE, cargar_audio
 
-    # Decodificamos con el mismo ffmpeg que usa Whisper (16 kHz, mono) y le pasamos
-    # la onda ya cargada a pyannote, así no dependemos de su propio decodificador.
-    # load_audio devuelve un mx.array de MLX y torch solo acepta arrays de numpy: lo convertimos.
-    audio = np.array(load_audio(str(audio_path)), dtype=np.float32)
+    # Decodificamos igual que Whisper (16 kHz, mono) y le pasamos la onda ya cargada
+    # a pyannote, así no dependemos de su propio decodificador.
+    audio = cargar_audio(audio_path)
     entrada = {"waveform": torch.from_numpy(audio).unsqueeze(0), "sample_rate": SAMPLE_RATE}
 
     def _ejecutar():

@@ -3,6 +3,7 @@
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -47,10 +48,16 @@ def extraer_fragmento(audio: Path, inicio: float, duracion: float, destino: Path
     return destino
 
 
+# En Windows, winsound (viene con Python) reproduce .wav. Corre en otro proceso para poder detenerlo.
+REPRODUCIR_EN_WINDOWS = "import sys, winsound; winsound.PlaySound(sys.argv[1], winsound.SND_FILENAME)"
+
+
 def comando_reproductor() -> Optional[list]:
-    """afplay viene con macOS; ffplay (de ffmpeg) sirve en otros sistemas."""
+    """afplay viene con macOS; en Windows, winsound; ffplay (de ffmpeg) sirve en otros sistemas."""
     if shutil.which("afplay"):
         return ["afplay"]
+    if sys.platform == "win32":
+        return [sys.executable, "-c", REPRODUCIR_EN_WINDOWS]
     if shutil.which("ffplay"):
         return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
     return None

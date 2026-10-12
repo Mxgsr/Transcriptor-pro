@@ -1,6 +1,6 @@
 # 🎙️ Transcriptor Pro
 
-Un sistema robusto y modular para transcribir audio y video (YouTube o archivos locales) utilizando **Whisper** sobre **MLX** (`mlx-whisper`), acelerado en la GPU de los Mac con Apple Silicon. 
+Un sistema robusto y modular para transcribir audio y video (YouTube o archivos locales) utilizando **Whisper**. Funciona en Mac y en Windows: en los Mac con chip Apple usa **MLX** (`mlx-whisper`), acelerado en su GPU; en Windows y en los Mac con Intel usa `faster-whisper`.
 
 Este proyecto fue refactorizado siguiendo principios de arquitectura limpia, manejo de errores avanzado y configuración mediante variables de entorno.
 
@@ -16,9 +16,39 @@ Este proyecto fue refactorizado siguiendo principios de arquitectura limpia, man
 
 ## 🛠️ Instalación
 
+### En cualquier computador, con una sola línea
+
+No hace falta clonar el proyecto, crear un `.venv` ni instalar ffmpeg: el instalador pone [uv](https://docs.astral.sh/uv/) (el gestor de Python) si falta, y con él Transcriptor y todo lo que necesita. Al final pregunta, opcionalmente, el token de Hugging Face para identificar hablantes (ver Diarización).
+
+**Mac** (abre la Terminal y pega):
+~~~
+curl -LsSf https://raw.githubusercontent.com/Mxgsr/Transcriptor-pro/main/instalar.sh | sh
+~~~
+
+**Windows** (abre PowerShell y pega):
+~~~
+powershell -ExecutionPolicy ByPass -c "irm https://raw.githubusercontent.com/Mxgsr/Transcriptor-pro/main/instalar.ps1 | iex"
+~~~
+
+Después abre una ventana nueva y escribe `transcriptor`. Para actualizar a la última versión, vuelve a pegar la misma línea. Para desinstalar: `uv tool uninstall transcriptor-pro`.
+
+Qué funciona en cada computador:
+
+| | Mac con chip Apple (M1 o posterior) | Windows | Mac con Intel |
+|---|---|---|---|
+| Transcribir | ✅ mlx-whisper, en la GPU | ✅ faster-whisper | ✅ faster-whisper |
+| Identificar hablantes | ✅ | ✅ | ❌ |
+| Corregir con IA | ✅ | ❌ (por ahora) | ❌ |
+
+_En un computador sin GPU de Apple, Whisper corre en el procesador y es más lento: `small` o `turbo` son buenas opciones. Con una tarjeta NVIDIA (y CUDA 12 y cuDNN 9 instalados) puedes usarla poniendo `TRANSCRIPTION_DEVICE=cuda` en el `.env`._
+
+La configuración de una instalación así (por ejemplo `HF_TOKEN`) va en `~/.transcriptor/.env` (en Windows, `C:\Users\TU_USUARIO\.transcriptor\.env`). Un `.env` en la carpeta del proyecto sigue funcionando y manda sobre ese.
+
+### Para trabajar en el código
+
 1. **Clonar el repositorio:**
 ~~~ 
-   git clone [https://github.com/Mxgsr/Transcriptor-pro.git](https://github.com/Mxgsr/Transcriptor-pro.git)
+   git clone https://github.com/Mxgsr/Transcriptor-pro.git
    cd Transcriptor-pro
 ~~~ 
 
@@ -32,7 +62,7 @@ source .venv/bin/activate
 ~~~ 
 uv pip install -e .
 ~~~
-_Nota: Requiere un Mac con Apple Silicon (M1 o posterior), porque MLX solo funciona ahí, y tener instalado ffmpeg en el sistema (`brew install ffmpeg`)._
+_Nota: cada computador instala solo el motor de Whisper que le sirve (mlx-whisper en Mac con chip Apple, faster-whisper en el resto). ffmpeg viene incluido (paquete `imageio-ffmpeg`); si ya lo tienes instalado en el sistema, se usa ese._
 
 4. Configurar variables de entorno:
 Crea un archivo .env en la raíz con el siguiente contenido:
@@ -41,13 +71,13 @@ DEFAULT_MODEL=medium
 DOWNLOAD_DIR=downloads
 ```
 🚀 Uso
-Con el entorno virtual activado, escribe solo:
+Escribe solo (si trabajas en el código, con el entorno virtual activado):
 ```
 transcriptor
 ```
-Se abre un menú: te mueves con ↑ ↓ y eliges con Enter. Para regresar a la pregunta anterior elige "← Volver" o aprieta Esc; Ctrl+C te lleva directo al menú principal. Desde ahí puedes transcribir un archivo o un enlace, corregir una transcripción, cambiar los nombres de los hablantes o ver tus últimas transcripciones. El menú recuerda lo último que elegiste (modelo, hablantes, corrección) y lo ofrece por defecto; el idioma y la carpeta salen de Configuración, y "Más opciones…" los cambia solo para esa transcripción. El historial y esas preferencias se guardan en `~/.transcriptor/`.
+Se abre un menú: te mueves con ↑ ↓ y eliges con Enter. Para regresar a la pregunta anterior elige "← Volver" o aprieta Esc; Ctrl+C te lleva directo al menú principal. Desde ahí puedes transcribir un archivo o un enlace, corregir una transcripción, cambiar los nombres de los hablantes o ver tus últimas transcripciones. El menú recuerda lo último que elegiste (modelo, hablantes, corrección) y lo ofrece por defecto; el idioma, la carpeta y el vocabulario para corregir salen de Configuración, y "Más opciones…" los cambia solo para esa transcripción. El historial y esas preferencias se guardan en `~/.transcriptor/`.
 
-En **Configuración** (también en el menú) eliges los valores por defecto: idioma, modelo de transcripción, modelo de IA para corregir, si identificar hablantes y si corregir al terminar (preguntar cada vez, siempre o nunca), la carpeta de las descargas de YouTube y la carpeta donde guardar las transcripciones (junto al audio, o siempre la misma). Valen también para los comandos (`transcriptor transcribir`, `transcriptor corregir`) cuando no indicas esa opción, y mandan sobre `DEFAULT_MODEL`, `DOWNLOAD_DIR` y `CORRECTOR_MODEL` del `.env`, que quedan como valores de fábrica.
+En **Configuración** (también en el menú) eliges los valores por defecto: idioma, modelo de transcripción, modelo de IA para corregir, vocabulario para corregir, si identificar hablantes y si corregir al terminar (preguntar cada vez, siempre o nunca), la carpeta de las descargas de YouTube y la carpeta donde guardar las transcripciones (junto al audio, o siempre la misma). Valen también para los comandos (`transcriptor transcribir`, `transcriptor corregir`) cuando no indicas esa opción, y mandan sobre `DEFAULT_MODEL`, `DOWNLOAD_DIR` y `CORRECTOR_MODEL` del `.env`, que quedan como valores de fábrica.
 
 Los mismos pasos existen como comandos, útiles en scripts o cuando ya sabes lo que quieres:
 ```
@@ -59,25 +89,27 @@ Opciones principales de `transcribir`:
 - `-m, --modelo`: modelo de Whisper (ver abajo).
 - `-i, --idioma`: idioma del audio (por defecto `es`).
 - `-o, --salida`: carpeta donde guardar la transcripción (por defecto, junto al audio).
-- `-v, --detalle`: muestra los mensajes internos y la salida de yt-dlp y mlx-whisper.
+- `-v, --detalle`: muestra los mensajes internos y la salida de yt-dlp y de Whisper.
 
 Whisper a veces entra en bucle en pausas, llantos o cuando hablan dos a la vez, y escribe la misma frase muchas veces ("Gracias. Gracias. Gracias..."). Para evitarlo, cada trozo se transcribe sin usar el texto anterior como pista (así un error no se arrastra) y se saltan los trozos dudosos rodeados de silencio. Lo que aun así se cuele se limpia al final, sin IA: una palabra repetida 4 o más veces seguidas, o una frase 3 o más, queda una sola vez. Las repeticiones normales del habla ("sí, sí, sí") se respetan.
 
 Las descargas de YouTube van a `DOWNLOAD_DIR` (por defecto `downloads/`), relativa a la carpeta desde la que ejecutas el comando.
 
-Modelos disponibles en `--modelo` (o `DEFAULT_MODEL` en el `.env`): `tiny`, `base`, `small`, `medium`, `large` (large-v3), `large-v2` y `turbo` (large-v3-turbo, casi tan preciso como `large` y mucho más rápido). También acepta directamente un repositorio de Hugging Face con un modelo MLX, por ejemplo `--modelo mlx-community/whisper-small-mlx-4bit`. La primera vez que usas un modelo se descarga automáticamente.
+Modelos disponibles en `--modelo` (o `DEFAULT_MODEL` en el `.env`): `tiny`, `base`, `small`, `medium`, `large` (large-v3), `large-v2` y `turbo` (large-v3-turbo, casi tan preciso como `large` y mucho más rápido). También acepta directamente un repositorio de Hugging Face con un modelo para el motor de tu computador, por ejemplo `--modelo mlx-community/whisper-small-mlx-4bit` en Mac con chip Apple o `--modelo Systran/faster-whisper-small` en Windows. La primera vez que usas un modelo se descarga automáticamente.
 
 🗣️ Diarización (identificar hablantes)
 
 Es opcional: sin `-d` (`--hablantes`) el programa funciona igual que siempre.
 
-1. Instala las dependencias extra:
+No funciona en los Mac con Intel (pyannote necesita una versión de PyTorch que ya no se publica para ellos).
+
+1. Instala las dependencias extra (el instalador de una línea ya las trae):
 ```
 uv pip install -e ".[diarizacion]"
 ```
 2. Crea un token de lectura en https://huggingface.co/settings/tokens.
 3. Acepta las condiciones de uso del modelo en https://huggingface.co/pyannote/speaker-diarization-community-1 con la misma cuenta.
-4. Añade el token a tu `.env`:
+4. Añade el token a tu `.env` (o pégalo cuando el instalador lo pregunte, que lo guarda en `~/.transcriptor/.env`):
 ```
 HF_TOKEN=hf_xxxxxxxxxxxxxxxx
 # Opcional: otro modelo de pyannote
@@ -129,7 +161,7 @@ Otras opciones: `--min N` y `--max N` cuando solo conoces un rango. Si usas `--n
 
 ✍️ Corrección con IA local
 
-Whisper casi nunca comete faltas de ortografía, pero sí confunde palabras que suenan parecido ("haber" por "a ver"), pone mal tildes como solo/tú y puntúa a su manera. `transcriptor corregir` repasa la transcripción con un modelo de lenguaje que corre en tu Mac (mlx-lm), sin enviar nada a internet.
+Whisper casi nunca comete faltas de ortografía, pero sí confunde palabras que suenan parecido ("haber" por "a ver"), pone mal tildes como solo/tú y puntúa a su manera. `transcriptor corregir` repasa la transcripción con un modelo de lenguaje que corre en tu Mac (mlx-lm), sin enviar nada a internet. Por ahora solo funciona en Mac con chip Apple (M1 o posterior).
 
 1. Instala las dependencias extra:
 ```
@@ -148,6 +180,15 @@ El resultado se guarda aparte, en `mi_audio.corregido.blocks.txt` (y su `.correg
 Cómo funciona:
 - Antes de la IA, y sin ella, quita las frases repetidas en bucle (igual que al transcribir), así también se limpian las transcripciones hechas antes de este cambio. Los errores de hablante de esas transcripciones solo se arreglan volviendo a transcribir.
 - Corrige párrafo a párrafo, dándole al modelo el párrafo anterior como contexto. Solo le pasa el texto: las marcas de tiempo y los hablantes no pasan por el modelo, así que no se pueden perder.
+- Si un párrafo sigue una frase que el anterior dejó sin terminar (mismo hablante, sin punto), no le pone mayúscula. Y un "qué" exclamativo ("¡Qué bonito!") no se convierte en pregunta.
+- Si el modelo cambia una palabra por otra que no suena igual ("lloro" por "llamo", "verla" por "vérala"), se deja la original: Whisper confunde palabras que suenan parecido, así que un cambio que suena distinto casi siempre empeora el texto. Los arreglos de lo mal oído ("haber" por "a ver", "valla" por "vaya") sí se aplican. Tampoco puede borrar palabras ("Qué bonito escucharla" -> "¿Bonito escucharla") ni quitar la mayúscula del inicio de una frase o de un nombre.
+- **Vocabulario:** Whisper no conoce los nombres propios ni las siglas de tu audio y los escribe como le suenan ("Cozán" por COSAM, "suyenta Catalina" por señorita Catalina). Dale la lista a la corrección y los escribe bien:
+  ```
+  transcriptor corregir "downloads/mi_audio.blocks.json" --vocabulario "COSAM, OSL, FOSIS, señorita Catalina"
+  ```
+  Los nombres que suenan casi igual a uno de la lista se cambian antes de la IA y sin ella, porque la IA casi nunca se atreve: solo los que Whisper escribió como nombre (con mayúscula a media frase o en mayúsculas, como "Cozán" o "ASL") y nunca palabras comunes ("cosas" no pasa a COSAM). En un nombre de varias palabras basta con que una esté bien ("la suyenta Catalina" -> "la señorita Catalina"). El resumen dice cuántos cambió, y el `.json` guarda el texto de antes en "texto_original".
+
+  En el menú está en Configuración (para todas) y en "Más opciones…" al transcribir con corrección (solo para esa vez); `--vocabulario ""` corrige sin vocabulario aunque haya uno en Configuración. La lista no se le da a Whisper al transcribir: probado con una entrevista real, así escribía bien los nombres pero se saltaba frases enteras.
 - **Salvaguarda:** si el modelo cambia más de un 15 % del texto de un párrafo (sin contar tildes, mayúsculas ni puntuación), se queda el original. Así no puede resumir ni reescribir. Se ajusta con `--max-cambio 25`.
 - Con `-r` ves cada cambio (lo quitado en rojo, lo nuevo en verde) y decides: Enter lo aplica, `n` deja el original, `t` aplica todos los que quedan.
 - En el `.corregido.blocks.json`, cada párrafo corregido guarda su `"texto_original"`, y los que no se aplicaron guardan la propuesta en `"correccion_no_aplicada"`.
@@ -162,7 +203,7 @@ Modelos (`-m`, o `CORRECTOR_MODEL` en el `.env`):
 La primera vez se descarga el modelo. Como referencia aproximada, una hora de audio con `qwen3-8b` debería tardar del orden de 10 a 15 minutos en un M4.
 
 🧪 Tests
-Los tests simulan mlx-whisper, mlx-lm y yt-dlp (no necesitan un Mac), así que corren en segundos sin red ni modelos:
+Los tests simulan mlx-whisper, faster-whisper, mlx-lm y yt-dlp (no necesitan un Mac), así que corren en segundos sin red ni modelos:
 ```
 uv pip install -r requirements-dev.txt
 python -m pytest

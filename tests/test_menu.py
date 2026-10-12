@@ -133,7 +133,7 @@ def test_transcribir_con_hablantes_y_correccion(guion, instalado, comandos, audi
     comandos.transcribir.assert_called_once_with(
         entrada=str(audio), modelo="turbo", hablantes=True, num=3, minimo=None, idioma="es", salida=None,
         carpeta_descargas=Path("downloads"))
-    comandos.corregir.assert_called_once_with(archivo=comandos.json, modelo="qwen3-8b")
+    comandos.corregir.assert_called_once_with(archivo=comandos.json, modelo="qwen3-8b", vocabulario="")
     assert historial.preferencias() == {
         "origen": "archivo", "modelo": "turbo", "hablantes": True, "cuantos": "3", "corregir": True}
 
@@ -585,7 +585,7 @@ def test_transcribir_corrige_siempre_con_el_modelo_configurado(guion, instalado,
     menu.flujo_transcribir()
 
     assert comandos.transcribir.call_args.kwargs["hablantes"] is False
-    comandos.corregir.assert_called_once_with(archivo=comandos.txt, modelo="gemma4-e4b")
+    comandos.corregir.assert_called_once_with(archivo=comandos.txt, modelo="gemma4-e4b", vocabulario="")
 
 
 def test_corta():
@@ -780,3 +780,131 @@ def test_volver_y_esc_con_questionary_de_verdad():
     assert _responder("\x1b[B\x1b[B\r", lambda: menu.elegir("¿Cuál?", opciones, volver=False)) == 1
     # Lo normal sigue igual
     assert _responder("hola\r", lambda: menu.texto("¿Nombre?")) == "hola"
+
+
+def test_en_windows_corregir_explica_que_solo_funciona_en_mac(guion, instalado, con_historial, capsys, monkeypatch):
+    from src import plataforma
+
+    instalado["mlx_lm"] = False
+    monkeypatch.setattr(plataforma, "correccion_disponible", lambda: False)
+    guion(("¿Cuál quieres corregir?", 0), ("¿Y ahora?", "menu"))
+
+    menu.flujo_corregir()
+
+    con_historial.corregir.assert_not_called()
+    error = " ".join(capsys.readouterr().err.split())
+    assert "solo funciona en Macs con chip Apple" in error
+    assert "uv pip install" not in error
+
+
+def test_en_mac_intel_no_ofrece_instalar_hablantes(guion, instalado, comandos, capsys, monkeypatch):
+    from src import plataforma
+
+    instalado.update({"pyannote.audio": False, "mlx_lm": False})
+    monkeypatch.setattr(plataforma, "hablantes_disponible", lambda: False)
+    guion(
+        ("¿De dónde viene?", "enlace"),
+        ("Pega el enlace", "https://youtu.be/abc"),
+        ("¿Qué modelo uso?", "turbo"),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+
+    menu.flujo_transcribir()
+
+    salida = " ".join(capsys.readouterr().out.split())
+    assert "no está disponible en Macs con procesador Intel" in salida
+    assert "uv pip install" not in salida
+
+
+def test_abrir_en_windows(monkeypatch, tmp_path):
+    archivo = tmp_path / "charla.blocks.txt"
+    abiertos, comandos = [], []
+    monkeypatch.setattr(menu.sys, "platform", "win32")
+    monkeypatch.setattr(menu.os, "startfile", abiertos.append, raising=False)
+    monkeypatch.setattr(menu.subprocess, "run", lambda comando, **kw: comandos.append(comando))
+
+    menu.abrir(archivo)
+    menu.abrir(archivo, revelar=True)
+
+    assert abiertos == [str(archivo)]
+    assert comandos == [f'explorer /select,"{archivo}"']
+
+
+def test_limpiar_ruta_en_windows_respeta_las_barras(monkeypatch):
+    monkeypatch.setattr(menu.sys, "platform", "win32")
+
+    assert str(menu.limpiar_ruta(r"C:\Users\max\audio.m4a")) == str(Path(r"C:\Users\max\audio.m4a"))
+    assert str(menu.limpiar_ruta(r'"C:\Users\max\Mi audio.m4a"')) == str(Path(r"C:\Users\max\Mi audio.m4a"))
+
+
+def test_mas_opciones_cambia_el_vocabulario_para_corregir_solo_esta_vez(guion, instalado, comandos, capsys):
+    ajustes.guardar(vocabulario="FOSIS")
+    guion(
+        ("¿De dónde viene?", "enlace"),
+        ("Pega el enlace", "https://youtu.be/abc"),
+        ("¿Qué modelo uso?", "turbo"),
+        ("¿Identifico quién habla?", False),
+        ("¿Corrijo el texto con IA", True),
+        ("¿Empiezo?", "mas"),
+        ("¿Qué quieres cambiar?", "vocabulario"),
+        ("Vocabulario", "COSAM, OSL, señorita Catalina"),
+        ("¿Qué quieres cambiar?", menu.Atras),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+
+    menu.flujo_transcribir()
+
+    assert guion.defecto_de("Vocabulario") == "FOSIS"
+    assert "vocabulario" not in comandos.transcribir.call_args.kwargs
+    assert comandos.corregir.call_args.kwargs["vocabulario"] == "COSAM, OSL, señorita Catalina"
+    assert "Vocabulario para corregir: COSAM, OSL, señorita Catalina." in " ".join(capsys.readouterr().out.split())
+    assert ajustes.valor("vocabulario") == "FOSIS"
+
+
+def test_sin_corregir_no_se_ofrece_el_vocabulario(guion, instalado, comandos):
+    ajustes.guardar(vocabulario="FOSIS")
+    guion(
+        ("¿De dónde viene?", "enlace"),
+        ("Pega el enlace", "https://youtu.be/abc"),
+        ("¿Qué modelo uso?", "turbo"),
+        ("¿Identifico quién habla?", False),
+        ("¿Corrijo el texto con IA", False),
+        ("¿Empiezo?", "mas"),
+        ("¿Qué quieres cambiar?", menu.Atras),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+
+    menu.flujo_transcribir()
+
+    opciones = [valor for _, valor in [h for h in guion.hechas if h[0] == "¿Qué quieres cambiar?"][0][1]]
+    assert opciones == ["idioma", "carpeta"]
+
+
+def test_configuracion_guarda_y_borra_el_vocabulario(guion, instalado):
+    guion(
+        ("¿Qué quieres cambiar?", "vocabulario"),
+        ("Vocabulario", "COSAM, OSL"),
+        ("¿Algo más?", menu.Atras),
+    )
+    menu.flujo_configuracion()
+    assert ajustes.valor("vocabulario") == "COSAM, OSL"
+    ultima = [t for t, _ in [h for h in guion.hechas if h[0] == "¿Algo más?"][-1][1]]
+    assert "Vocabulario para corregir: COSAM, OSL" in ultima
+
+    guion(
+        ("¿Qué quieres cambiar?", "vocabulario"),
+        ("Vocabulario", ""),
+        ("¿Algo más?", menu.Atras),
+    )
+    menu.flujo_configuracion()
+    assert ajustes.valor("vocabulario") == ""
+
+
+def test_texto_vocabulario_largo_se_acorta():
+    assert menu._texto_vocabulario("") == "ninguno"
+    largo = "COSAM, OSL, FOSIS, señorita Catalina, Alejandro Parra, Programa Familias"
+    assert menu._texto_vocabulario(largo).endswith("…")
+    assert len(menu._texto_vocabulario(largo)) <= 40

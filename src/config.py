@@ -1,9 +1,15 @@
 # src/config.py
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
 # 1. Cargamos la caja fuerte (.env)
+# Primero el .env del proyecto (como siempre). Después el de ~/.transcriptor/, que es donde lo deja
+# el instalador: instalado con uv tool, el programa no vive en la carpeta del proyecto.
+# Lo que ya esté definido no se pisa, así que el .env del proyecto manda.
 load_dotenv()
+load_dotenv(Path(os.getenv("TRANSCRIPTOR_HOME", "~/.transcriptor")).expanduser() / ".env")
 
 # 2. Configuración de Auditoría (Logging)
 # La configura la CLI (src/cli.py) al arrancar, según se pida o no el detalle (-v).
@@ -11,6 +17,9 @@ load_dotenv()
 # 3. Variables Globales (PEP 8: Constantes siempre en MAYÚSCULAS)
 DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "downloads")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "medium")
+# Dónde corre la transcripción con faster-whisper (Windows y Macs con Intel): cpu, o cuda para
+# una GPU NVIDIA (necesita CUDA 12 y cuDNN 9 instalados). En Mac con chip Apple no se usa.
+TRANSCRIPTION_DEVICE = os.getenv("TRANSCRIPTION_DEVICE", "cpu")
 
 # 4. Filtro de Entrada (Validación Temprana)
 # Documentación del porqué: Es mejor que el programa "explote" rápido y aquí, 

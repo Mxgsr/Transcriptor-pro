@@ -14,6 +14,7 @@ import typer
 import typer.rich_utils
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, ProgressColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.spinner import Spinner
@@ -21,6 +22,7 @@ from rich.table import Column, Table
 from rich.text import Text
 
 from src.diarizer import parsear_nombres
+from src.ffmpeg_local import asegurar_ffmpeg
 from src import fragmentos
 
 # Títulos de la ayuda en español (Typer los trae en inglés)
@@ -53,6 +55,7 @@ def principal(ctx: typer.Context):
 
     Ejemplo: [cyan]transcriptor transcribir "https://youtu.be/..." -m small -d[/]
     """
+    asegurar_ffmpeg()
     if ctx.invoked_subcommand is not None:
         return
     # Sin comando: en una terminal, el menú; en un script (sin nadie que responda), la ayuda
@@ -75,7 +78,7 @@ def transcribir(
         metavar="ENTRADA", help="URL de YouTube o ruta a un archivo de audio o video.", show_default=False)],
     modelo: Annotated[Optional[str], typer.Option(
         "--modelo", "-m", autocompletion=_completar_modelo, show_default=False,
-        help="Modelo de Whisper: tiny, base, small, medium, large, turbo, o un repo de mlx-community. "
+        help="Modelo de Whisper: tiny, base, small, medium, large, turbo, o un repo de Hugging Face. "
              "Por defecto, el de la configuración.")] = None,
     hablantes: Annotated[bool, typer.Option(
         "--hablantes", "-d", rich_help_panel=PANEL_HABLANTES,
@@ -279,6 +282,10 @@ def corregir(
              "(tildes, mayúsculas y puntuación no cuentan).")] = 15,
     revisar: Annotated[bool, typer.Option(
         "--revisar", "-r", help="Muestra cada cambio y te pregunta si aplicarlo.")] = False,
+    vocabulario: Annotated[Optional[str], typer.Option(
+        "--vocabulario", show_default=False,
+        help='Nombres y siglas que aparecen en el audio, separados por comas ("COSAM, OSL, señorita Catalina"), '
+             'para que la IA los escriba bien. Por defecto, el de la configuración; "" para no usar ninguno.')] = None,
     detalle: Annotated[bool, typer.Option(
         "--detalle", "-v", help="Muestra los mensajes internos de cada paso.")] = False,
 ):
@@ -287,7 +294,7 @@ def corregir(
 
     Corrige párrafo a párrafo sin tocar las marcas de tiempo ni los hablantes, y guarda el resultado aparte en un [cyan].corregido.blocks.txt[/]; la transcripción original no cambia.
 
-    Antes de la IA, y sin ella, quita las frases que Whisper repitió en bucle ("Gracias. Gracias. Gracias...").
+    Antes de la IA, y sin ella, quita las frases que Whisper repitió en bucle ("Gracias. Gracias. Gracias...") y escribe bien los nombres del vocabulario que Whisper oyó mal ("Cozán" -> "COSAM").
 
     [cyan]transcriptor corregir archivo.blocks.json -r[/] te deja revisar cada cambio antes de aplicarlo.
     """
@@ -296,6 +303,8 @@ def corregir(
     from src import ajustes, corrector, repeticiones
 
     modelo = modelo or ajustes.valor("modelo_corrector")
+    vocabulario = corrector.preparar_vocabulario(
+        vocabulario if vocabulario is not None else ajustes.valor("vocabulario"))
     try:
         repo = corrector.resolver_modelo(modelo)
     except ValueError as e:
@@ -316,7 +325,12 @@ def corregir(
     datos["parrafos"] = repeticiones.limpiar_parrafos(antes, guardar_original=True)
     parrafos = datos["parrafos"]
     sin_bucles = sum(1 for a, b in zip(antes, parrafos) if a["text"].strip() != b["text"])
+    # Sin IA: la IA casi nunca cambia un nombre mal oído por el del vocabulario
+    datos["parrafos"], nombres_arreglados = corrector.aplicar_vocabulario(parrafos, vocabulario, guardar_original=True)
+    parrafos = datos["parrafos"]
     consola.print(f"\n [bold]Transcriptor Pro[/] · corrigiendo con [cyan]{modelo}[/] · {len(parrafos)} párrafos\n")
+    if vocabulario:
+        consola.print(f" [dim]Vocabulario: {escape(vocabulario)}[/]\n")
 
     inicio = time.monotonic()
     correcciones, interrumpido = [], False
@@ -326,10 +340,10 @@ def corregir(
                 pasos("Cargando modelo")
             else:
                 pasos("Descargando modelo")
-            generar = corrector.cargar_generador(repo, silencioso=not detalle)
+            generar = corrector.cargar_generador(repo, silencioso=not detalle, vocabulario=vocabulario)
             pasos("Corrigiendo")
             try:
-                for correccion in corrector.corregir_parrafos(parrafos, generar, max_cambio / 100):
+                for correccion in corrector.corregir_parrafos(parrafos, generar, max_cambio / 100, vocabulario):
                     correcciones.append(correccion)
                     pasos.progresar(len(correcciones), len(parrafos), "párrafos")
             except KeyboardInterrupt:
@@ -359,7 +373,7 @@ def corregir(
         raise typer.Exit(1)
 
     _mostrar_resumen_correccion(txt_path, parrafos, correcciones, corrector, procesados,
-                                time.monotonic() - inicio, revision_cortada, sin_bucles)
+                                time.monotonic() - inicio, revision_cortada, sin_bucles, nombres_arreglados)
     return txt_path
 
 
@@ -418,7 +432,7 @@ def _diferencias(original: str, propuesta: str) -> Text:
 
 def _mostrar_resumen_correccion(txt_path: Path, parrafos: list, correcciones: list, corrector,
                                 procesados: int, segundos: float, revision_cortada: bool,
-                                sin_bucles: int = 0):
+                                sin_bucles: int = 0, nombres_arreglados: int = 0):
     cuenta = {}
     for c in correcciones:
         cuenta[c.estado] = cuenta.get(c.estado, 0) + 1
@@ -430,6 +444,9 @@ def _mostrar_resumen_correccion(txt_path: Path, parrafos: list, correcciones: li
     tabla.add_row("Cambios", f"{cuenta.get(corrector.APLICADA, 0)} de {len(parrafos)} párrafos")
     if sin_bucles:
         tabla.add_row("Repeticiones", f"quitadas en {_plural(sin_bucles, 'párrafo')}")
+    if nombres_arreglados:
+        tabla.add_row("Vocabulario", f"{nombres_arreglados} "
+                                     f"{'nombre corregido' if nombres_arreglados == 1 else 'nombres corregidos'}")
     if procesados < len(parrafos):
         tabla.add_row("Revisados", Text(
             f"solo los primeros {procesados}; el resto quedó como estaba.", style="yellow"))

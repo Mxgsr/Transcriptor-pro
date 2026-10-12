@@ -6,21 +6,28 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "transcriptor-pro"
 version = "0.1.0"
-description = "Transcribe audio y video (YouTube o archivos locales) con Whisper sobre MLX."
+description = "Transcribe audio y video (YouTube o archivos locales) con Whisper, en Mac y Windows."
 readme = "README.md"
 requires-python = ">=3.10"
+# Cada computador instala solo el motor de Whisper que le sirve:
+# mlx-whisper en Mac con chip Apple (usa su GPU), faster-whisper en Windows, Linux y Macs con Intel.
 dependencies = [
     "python-dotenv==1.2.1",
-    "mlx-whisper",
+    "mlx-whisper; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "faster-whisper>=1.1; sys_platform != 'darwin' or platform_machine != 'arm64'",
     "yt-dlp",
     "ffmpeg-python",
+    # Trae un ffmpeg listo para usar, así no hay que instalarlo aparte (ver src/ffmpeg_local.py)
+    "imageio-ffmpeg>=0.5",
     "typer>=0.12",
     "questionary>=2.0",
 ]
 
 [project.optional-dependencies]
-diarizacion = ["pyannote.audio>=4.0"]
-correccion = ["mlx-lm"]
+# pyannote 4 necesita un PyTorch que ya no se publica para Macs con Intel
+diarizacion = ["pyannote.audio>=4.0; sys_platform != 'darwin' or platform_machine == 'arm64'"]
+# mlx-lm solo existe para Mac con chip Apple
+correccion = ["mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'"]
 
 [project.scripts]
 transcriptor = "src.cli:app"
