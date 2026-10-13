@@ -69,4 +69,4 @@ if [ "$es_mac_intel" = false ] && ! grep -qs '^HF_TOKEN=' "$CONFIG" && (: </dev/
 fi
 
 paso "Listo"
-echo "Abre una ventana nueva de la Terminal y escribe: transcriptor"
+echo "Cierra la Terminal por completo (Cmd+Q), ábrela de nuevo y escribe: transcriptor"

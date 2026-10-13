@@ -70,4 +70,4 @@ if (-not $TieneToken) {
 }
 
 Paso "Listo"
-Write-Host "Abre una ventana nueva de PowerShell y escribe: transcriptor"
+Write-Host "Cierra todas las ventanas de PowerShell, abre una nueva y escribe: transcriptor"
