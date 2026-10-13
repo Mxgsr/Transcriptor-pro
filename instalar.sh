@@ -8,7 +8,7 @@
 # ffmpeg viene incluido. No hace falta clonar el proyecto ni crear un .venv.
 set -eu
 
-PAQUETE="transcriptor-pro[diarizacion,correccion] @ https://github.com/Mxgsr/Transcriptor-pro/archive/refs/heads/main.zip"
+ZIP="https://github.com/Mxgsr/Transcriptor-pro/archive/refs/heads/main.zip"
 CONFIG="$HOME/.transcriptor/.env"
 
 paso() { printf '\n\033[1;35m==>\033[0m \033[1m%s\033[0m\n' "$1"; }
@@ -26,8 +26,24 @@ fi
 
 # 2. Transcriptor. Los extras que no sirven en este computador se saltan solos
 #    (la corrección con IA solo se instala en Mac con chip Apple).
+#    El proyecto lo baja curl (el mismo que bajó este instalador, así que sabemos que llega a GitHub)
+#    y uv lo instala desde ese archivo. Más tiempo de espera que el de fábrica (30 s), por si la
+#    conexión es lenta: después vienen paquetes grandes como PyTorch.
+paso "Descargando Transcriptor Pro"
+TEMPORAL="$(mktemp -d)"
+trap 'rm -rf "$TEMPORAL"' EXIT
+curl -LsSf --retry 3 --connect-timeout 30 -o "$TEMPORAL/transcriptor-pro.zip" "$ZIP"
+
 paso "Instalando Transcriptor Pro (la primera vez tarda unos minutos)"
-uv tool install --force --upgrade --reinstall-package transcriptor-pro --python 3.11 "$PAQUETE"
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-300}"
+if ! uv tool install --force --upgrade --reinstall-package transcriptor-pro --python 3.11 \
+        "transcriptor-pro[diarizacion,correccion] @ file://$TEMPORAL/transcriptor-pro.zip"; then
+    echo ""
+    echo "No se pudo instalar: uv no logró descargar lo que necesita (mira el error de arriba)."
+    echo "Revisa la conexión a internet (si usas una VPN, prueba sin ella) y vuelve a pegar"
+    echo "la misma línea: lo que ya se descargó no se vuelve a bajar."
+    exit 1
+fi
 
 # 3. Que el comando `transcriptor` se encuentre en las terminales nuevas
 uv tool update-shell >/dev/null 2>&1 || true
