@@ -295,6 +295,26 @@ def test_error_muestra_recuadro_y_sale_con_1(monkeypatch):
     assert "-v" in resultado.output
 
 
+def test_sin_internet_y_modelo_no_descargado_lo_explica(monkeypatch):
+    class LocalEntryNotFoundError(FileNotFoundError):
+        pass
+
+    def falla(*args, **kwargs):
+        try:
+            raise LocalEntryNotFoundError("Cannot find the requested files in the disk cache")
+        except LocalEntryNotFoundError as e:
+            raise RuntimeError("El motor falló") from e
+
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(procesador, "procesar_entrada", falla)
+
+    resultado = runner.invoke(app, ["transcribir", "clase.mp3"])
+
+    assert resultado.exit_code == 1
+    assert "Sin internet" in resultado.output
+    assert "disk cache" not in resultado.output
+
+
 def test_error_marca_el_paso_que_fallo(monkeypatch):
     def falla(entrada, modelo, al_avanzar, **kwargs):
         al_avanzar("Transcribiendo")

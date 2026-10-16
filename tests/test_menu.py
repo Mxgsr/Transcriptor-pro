@@ -1,5 +1,6 @@
 # Ubicación: tests/test_menu.py
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -503,6 +504,24 @@ def test_configuracion_cambia_y_guarda_cada_ajuste(guion, instalado, tmp_path, c
     assert "Idioma: Inglés" in ultima
     assert "Identificar hablantes: siempre" in ultima
     assert "Corregir al terminar: nunca" in ultima
+
+
+def test_configuracion_sin_internet(guion, instalado, monkeypatch):
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    guion(
+        ("¿Qué quieres cambiar?", "sin_internet"),
+        ("¿Uso solo los modelos ya descargados?", True),
+        ("¿Algo más?", menu.Atras),
+    )
+
+    menu.flujo_configuracion()
+
+    assert ajustes.valor("sin_internet") is True
+    # Se aplica al momento, sin tener que volver a abrir el programa
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert guion.defecto_de("¿Uso solo los modelos ya descargados?") is False
+    ultima = [t for t, _ in [h for h in guion.hechas if h[0] == "¿Algo más?"][-1][1]]
+    assert "Sin internet: sí" in ultima
 
 
 def test_configuracion_volver_a_guardar_junto_al_audio(guion, instalado, tmp_path):

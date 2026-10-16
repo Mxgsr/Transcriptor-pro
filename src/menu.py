@@ -530,6 +530,8 @@ def flujo_configuracion():
             cambio = None
         if cambio is not None:
             ajustes.guardar(**{opcion: cambio})
+            if opcion == "sin_internet":
+                ajustes.aplicar_sin_internet(cambio)
             consola.print("[green]✓[/] Guardado.")
             _avisar_si_falta(opcion, cambio)
         mensaje = "¿Algo más?"
@@ -546,6 +548,7 @@ def _elegir_ajuste(mensaje: str, salida: Optional[Path]) -> str:
         (f"Corregir al terminar: {_nombre_modo(ajustes.valor('modo_correccion'))}", "modo_correccion"),
         (f"Carpeta de descargas: {_texto_descargas()}", "carpeta_descargas"),
         (f"Carpeta de las transcripciones: {corta(salida) if salida else 'junto al audio'}", "carpeta_salida"),
+        (f"Sin internet: {'sí' if ajustes.valor('sin_internet') else 'no'}", "sin_internet"),
     ])
 
 
@@ -564,6 +567,11 @@ def _cambiar_ajuste(clave: str):
         return elegir("¿Identifico quién habla al transcribir?", MODOS, actual)
     if clave == "modo_correccion":
         return elegir("¿Corrijo el texto con IA al terminar de transcribir?", MODOS, actual)
+    if clave == "sin_internet":
+        return elegir("¿Uso solo los modelos ya descargados?", [
+            ("No: revisa si hay versiones nuevas y descarga los modelos que falten", False),
+            ("Sí: no se conecta a Hugging Face (YouTube igual necesita internet)", True),
+        ], bool(actual))
     if clave == "carpeta_descargas":
         elegida = ruta("Carpeta para el audio que se descarga de YouTube (se crea si no existe):",
                        validar=_validar_carpeta_obligatoria, solo_carpetas=True,

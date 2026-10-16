@@ -63,6 +63,10 @@ Desde el menú puedes:
 
 La transcripción se guarda como un archivo `.blocks.txt`, con la hora de cada párrafo. La primera vez que usas un modelo se descarga solo, así que necesitas internet.
 
+## 🔒 Privacidad e internet
+
+El audio y el texto nunca salen de tu computador: todo se procesa ahí. Internet solo se usa para instalar, para descargar cada modelo la primera vez, para bajar videos de YouTube y para revisar si hay versiones nuevas de los modelos. Para que no se conecte ni siquiera para eso, activa **Sin internet** en Configuración (necesitas tener ya descargados los modelos que uses).
+
 ## ✅ Qué funciona en cada computador
 
 | | Mac con chip Apple (M1 o posterior) | Windows | Mac con Intel |

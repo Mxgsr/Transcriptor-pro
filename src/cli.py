@@ -56,6 +56,9 @@ def principal(ctx: typer.Context):
     Ejemplo: [cyan]transcriptor transcribir "https://youtu.be/..." -m small -d[/]
     """
     asegurar_ffmpeg()
+    # Antes de que alguna librería importe huggingface_hub, que lee HF_HUB_OFFLINE al importarse
+    from src import ajustes
+    ajustes.aplicar_sin_internet()
     if ctx.invoked_subcommand is not None:
         return
     # Sin comando: en una terminal, el menú; en un script (sin nadie que responda), la ayuda
@@ -697,9 +700,24 @@ def _mostrar_error(e: Exception, detalle: bool):
     if detalle:
         consola_err.print_exception()
     mensaje = Text(str(e) or type(e).__name__)
+    if _falta_modelo_sin_internet(e):
+        mensaje = Text("Está activado «Sin internet» y ese modelo todavía no está descargado. "
+                       "Desactívalo en Configuración (o quita HF_HUB_OFFLINE del .env) para descargarlo.")
     if not detalle:
         mensaje.append("\n\nVuelve a ejecutarlo con -v para ver el detalle.", style="dim")
     consola_err.print(Panel(mensaje, title="Error", title_align="left", border_style="red", expand=False))
+
+
+def _falta_modelo_sin_internet(e: Exception) -> bool:
+    """True si el error es de huggingface_hub porque el modelo no está descargado y no puede ir a buscarlo."""
+    from src import ajustes
+    if not ajustes.sin_internet_activo():
+        return False
+    while e is not None:
+        if type(e).__name__ in ("OfflineModeIsEnabled", "LocalEntryNotFoundError"):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
 
 
 def _mostrar_resumen(resultado, segundos: float):

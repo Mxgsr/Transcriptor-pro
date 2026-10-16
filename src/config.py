@@ -11,6 +11,12 @@ from dotenv import load_dotenv
 load_dotenv()
 load_dotenv(Path(os.getenv("TRANSCRIPTOR_HOME", "~/.transcriptor")).expanduser() / ".env")
 
+# Privacidad: pyannote (identificar hablantes) envía por defecto a sus servidores cuánto dura cada
+# audio y cuántos hablantes se pidieron, y Hugging Face también junta estadísticas de uso.
+# Las apagamos. Quien quiera compartirlas puede poner PYANNOTE_METRICS_ENABLED=true en su .env.
+os.environ.setdefault("PYANNOTE_METRICS_ENABLED", "false")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+
 # 2. Configuración de Auditoría (Logging)
 # La configura la CLI (src/cli.py) al arrancar, según se pida o no el detalle (-v).
 
