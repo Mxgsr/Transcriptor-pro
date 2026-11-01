@@ -86,3 +86,13 @@ def test_comando_reproductor_en_windows_usa_winsound(monkeypatch):
 
     assert comando[0] == fragmentos.sys.executable
     assert "winsound" in comando[-1]
+
+
+def test_buscar_audio_movido_con_su_nombre_junto_al_json(tmp_path):
+    # Con título, el .json no se llama como el audio: se busca el audio por su propio nombre
+    json_path = tmp_path / "2026-10-30 Reunión.blocks.json"
+    audio = tmp_path / "zoom_0.m4a"
+    audio.write_bytes(b"")
+
+    assert fragmentos.buscar_audio(json_path, "/otra/carpeta/zoom_0.m4a") == audio
+    assert fragmentos.buscar_audio(json_path, r"C:\Users\ana\zoom_0.m4a") == audio

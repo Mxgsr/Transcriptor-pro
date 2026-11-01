@@ -84,3 +84,56 @@ def test_preferencias_se_suman(historial_temporal):
     assert historial.preferencias() == {"modelo": "large", "hablantes": True}
     guardado = json.loads((historial_temporal / historial.ARCHIVO_PREFERENCIAS).read_text(encoding="utf-8"))
     assert guardado == {"modelo": "large", "hablantes": True}
+
+
+# --- Personas del equipo ----------------------------------------------------
+
+def test_sin_personas_la_lista_esta_vacia():
+    assert historial.personas() == []
+
+
+def test_personas_mas_usadas_primero_y_luego_las_mas_recientes(historial_temporal):
+    historial.recordar_personas(["Ana"])
+    historial.recordar_personas(["Luis"])
+    historial.recordar_personas(["Marta"])
+    historial.recordar_personas(["Luis"])
+    # Luis: 2 veces. Ana y Marta: 1; Marta es más reciente
+    assert historial.personas() == ["Luis", "Marta", "Ana"]
+
+    guardado = json.loads((historial_temporal / historial.ARCHIVO_PERSONAS).read_text(encoding="utf-8"))
+    assert guardado["Luis"]["veces"] == 2 and "ultima" in guardado["Luis"]
+
+
+def test_un_nombre_repetido_en_la_misma_llamada_cuenta_una_vez():
+    historial.recordar_personas(["Ana", "Ana", " Ana "])
+    historial.recordar_personas(["Luis"])
+    historial.recordar_personas(["Luis"])
+    assert historial.personas() == ["Luis", "Ana"]
+
+
+def test_ignora_vacios_y_etiquetas_genericas(historial_temporal):
+    historial.recordar_personas(["", "   ", "Hablante 1", "Hablante 12", None, "Ana"])
+    assert historial.personas() == ["Ana"]
+
+
+def test_sin_nombres_validos_no_crea_el_archivo(historial_temporal):
+    historial.recordar_personas(["Hablante 2", ""])
+    assert not (historial_temporal / historial.ARCHIVO_PERSONAS).exists()
+
+
+def test_personas_danado_se_trata_como_vacio(historial_temporal):
+    historial_temporal.mkdir()
+    (historial_temporal / historial.ARCHIVO_PERSONAS).write_text("{no es json", encoding="utf-8")
+    assert historial.personas() == []
+
+    historial.recordar_personas(["Ana"])
+    assert historial.personas() == ["Ana"]
+
+
+def test_personas_con_contenido_raro_no_rompe(historial_temporal):
+    historial_temporal.mkdir()
+    (historial_temporal / historial.ARCHIVO_PERSONAS).write_text(
+        json.dumps({"Ana": 3, "Luis": {"veces": "x"}, "Hablante 1": {"veces": 9}}), encoding="utf-8")
+    assert historial.personas() == ["Luis"]
+    historial.recordar_personas(["Luis"])
+    assert historial.personas() == ["Luis"]

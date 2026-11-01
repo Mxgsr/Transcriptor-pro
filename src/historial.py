@@ -5,6 +5,7 @@
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 ARCHIVO_HISTORIAL = "historial.json"
 ARCHIVO_PREFERENCIAS = "preferencias.json"
+# Las personas con las que se graba seguido: {"Ana": {"veces": 3, "ultima": <timestamp>}}
+ARCHIVO_PERSONAS = "personas.json"
 # Más que suficiente para la lista del menú, sin que el archivo crezca para siempre
 MAX_ENTRADAS = 200
 
@@ -89,3 +92,44 @@ def preferencias() -> dict:
 
 def guardar_preferencias(**cambios):
     _escribir(ARCHIVO_PREFERENCIAS, {**preferencias(), **cambios})
+
+
+def _es_nombre_de_persona(nombre) -> bool:
+    """Un nombre real: no vacío y no una etiqueta genérica como "Hablante 1"."""
+    # Importación diferida: así este módulo no depende del diarizador al cargarse
+    from src.diarizer import ETIQUETA_GENERICA
+
+    if not isinstance(nombre, str) or not nombre.strip():
+        return False
+    return not re.fullmatch(rf"{re.escape(ETIQUETA_GENERICA)} \d+", nombre.strip())
+
+
+def personas() -> list:
+    """Los nombres guardados: primero los más usados y, a igual uso, los más recientes."""
+    datos = _leer(ARCHIVO_PERSONAS, {})
+    validos = [(n, d) for n, d in datos.items() if isinstance(d, dict) and _es_nombre_de_persona(n)]
+
+    def numero(d, clave):
+        valor = d.get(clave)
+        return valor if isinstance(valor, (int, float)) else 0
+
+    validos.sort(key=lambda par: (numero(par[1], "veces"), numero(par[1], "ultima")), reverse=True)
+    return [n for n, _ in validos]
+
+
+def recordar_personas(nombres):
+    """Suma un uso a cada nombre (una vez por nombre aunque se repita). Ignora vacíos y etiquetas genéricas."""
+    nuevos = []
+    for n in nombres:
+        n = n.strip() if isinstance(n, str) else n
+        if _es_nombre_de_persona(n) and n not in nuevos:
+            nuevos.append(n)
+    if not nuevos:
+        return
+    datos = _leer(ARCHIVO_PERSONAS, {})
+    ahora = time.time()
+    for n in nuevos:
+        anterior = datos.get(n) if isinstance(datos.get(n), dict) else {}
+        veces = anterior.get("veces") if isinstance(anterior.get("veces"), int) else 0
+        datos[n] = {"veces": veces + 1, "ultima": ahora}
+    _escribir(ARCHIVO_PERSONAS, datos)

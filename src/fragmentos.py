@@ -22,6 +22,12 @@ def buscar_audio(json_path: Path, audio_guardado: Optional[str]) -> Optional[Pat
     """
     if audio_guardado and Path(audio_guardado).exists():
         return Path(audio_guardado)
+    # Si se movió la carpeta: el audio con su nombre de siempre junto al .json (con título, el .json
+    # se llama "2026-10-30 Reunión.blocks.json" y el audio no comparte su nombre)
+    if audio_guardado:
+        junto = json_path.with_name(Path(str(audio_guardado).replace("\\", "/")).name)
+        if junto.exists():
+            return junto
     base = json_path.name.removesuffix(".blocks.json")
     for extension in EXTENSIONES_AUDIO:
         candidato = json_path.with_name(base + extension)

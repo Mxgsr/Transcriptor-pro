@@ -4635,7 +4635,7 @@ wheels = [
 
 [[package]]
 name = "transcriptor-pro"
-version = "0.1.0"
+version = "2.0.0b1"
 source = { editable = "." }
 dependencies = [
     { name = "faster-whisper", marker = "platform_machine != 'arm64' or sys_platform != 'darwin'" },

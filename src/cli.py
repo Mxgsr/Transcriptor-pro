@@ -1,6 +1,7 @@
 # Ubicación: src/cli.py
 # Interfaz de línea de comandos (comando `transcriptor`).
 # Todo lo que se ve en pantalla vive aquí; la lógica sigue en src/procesador.py.
+import contextlib
 import json
 import logging
 import sys
@@ -22,7 +23,7 @@ from rich.text import Text
 
 from src.diarizer import parsear_nombres
 from src.ffmpeg_local import asegurar_ffmpeg
-from src import fragmentos
+from src import aviso, errores, fragmentos
 
 # Títulos de la ayuda en español (Typer los trae en inglés)
 typer.rich_utils.ARGUMENTS_PANEL_TITLE = "Argumentos"
@@ -41,6 +42,13 @@ app = typer.Typer(
 # Pantalla normal (progreso y resumen) y pantalla de errores y avisos
 consola = Console()
 consola_err = Console(stderr=True)
+
+# Archivo con el detalle del último error mostrado (None si no hubo). Se limpia al empezar cada comando;
+# el menú lo usa para ofrecer «Ver el detalle» y «Copiar el error».
+ultimo_error: Optional[Path] = None
+
+# Desde cuántos segundos de trabajo se pide confirmar Ctrl+C y se avisa al terminar
+SEGUNDOS_TRABAJO_LARGO = 60
 
 PANEL_HABLANTES = "Hablantes"
 
@@ -145,11 +153,16 @@ def transcribir(
 def ejecutar_transcripcion(entrada: str, modelo: str, hablantes: bool = False, num: Optional[int] = None,
                            minimo: Optional[int] = None, maximo: Optional[int] = None, nombres: Optional[dict] = None,
                            idioma: str = "es", salida: Optional[Path] = None, carpeta_descargas: Optional[Path] = None,
-                           detalle: bool = False, sin_preguntas: bool = False):
+                           detalle: bool = False, sin_preguntas: bool = False, desde_menu: bool = False,
+                           titulo: Optional[str] = None, fecha=None):
     """
     Transcribe con todo ya decidido (lo usan el comando `transcribir` y el menú).
     salida=None guarda junto al audio. Retorna el Resultado; si falla, lo muestra y sale con typer.Exit.
+    desde_menu: los avisos no nombran comandos (quien usa el menú no los conoce).
+    titulo y fecha (date o AAAA-MM-DD) los manda el menú: nombran el archivo y ponen el encabezado.
     """
+    global ultimo_error
+    ultimo_error = None
     mapa_nombres = nombres or {}
     cabecera = f"\n [bold]Transcriptor Pro[/] · modelo [cyan]{modelo}[/]"
     if hablantes:
@@ -157,11 +170,17 @@ def ejecutar_transcripcion(entrada: str, modelo: str, hablantes: bool = False, n
     consola.print(cabecera + "\n")
 
     inicio = time.monotonic()
+    # Con una persona delante: Ctrl+C pide confirmación pasado el primer minuto y se avisa al terminar
+    con_persona = not sin_preguntas and _es_interactivo()
+    confirmar = (aviso.confirmar_cancelar(despues_de=SEGUNDOS_TRABAJO_LARGO,
+                                          avisar=lambda texto: consola.print(f"[yellow]{texto}[/]"))
+                 if con_persona else contextlib.nullcontext())
     try:
         # Importación diferida: así `transcriptor --help` responde al instante
         from src import procesador
 
-        with _Pasos(consola, animado=not detalle) as pasos:
+        # sin_dormir siempre (también en scripts y en el Grabador): no cambia nada visible
+        with aviso.sin_dormir(), confirmar, _Pasos(consola, animado=not detalle) as pasos:
             resultado = procesador.procesar_entrada(
                 entrada,
                 modelo,
@@ -178,6 +197,8 @@ def ejecutar_transcripcion(entrada: str, modelo: str, hablantes: bool = False, n
                 # Con -v se ven las barras propias de yt-dlp y mlx-whisper
                 al_progresar=None if detalle else pasos.progresar,
                 silenciar_motores=not detalle,
+                titulo=titulo,
+                fecha=fecha,
             )
     except KeyboardInterrupt:
         consola_err.print("\n[yellow]Cancelado.[/]")
@@ -186,18 +207,37 @@ def ejecutar_transcripcion(entrada: str, modelo: str, hablantes: bool = False, n
         _mostrar_error(e, detalle)
         raise typer.Exit(1)
 
+    # Si tardó, la persona pudo irse a otra cosa: la avisamos ANTES de preguntar por los nombres
+    if con_persona and time.monotonic() - inicio > SEGUNDOS_TRABAJO_LARGO:
+        nombre_listo = Path(resultado.txt_path).name.removesuffix(".blocks.txt")
+        aviso.notificar("Transcripción lista", f"Listo: {nombre_listo}, {_duracion(resultado.duracion)}")
+
+    # Nombres dados con --nombres: los recordamos para ofrecerlos la próxima vez
+    if resultado.json_path and mapa_nombres:
+        _recordar_personas(mapa_nombres.values())
+        _guardar_voces(mapa_nombres, resultado.huellas, resultado.json_path)
+
     # Con hablantes y sin nombres dados: ofrecemos escucharlos para ponerles nombre
     if resultado.json_path and not mapa_nombres and not sin_preguntas and _es_interactivo():
         try:
-            hablantes = _hablantes_en_orden(resultado.parrafos)
-            if _confirmar(f"\nSe detectaron {len(hablantes)} hablante(s). ¿Quieres escucharlos y ponerles nombre?"):
-                mapa = _escuchar_y_nombrar(resultado.parrafos, {}, resultado.audio_path)
+            from src import menu
+            cuantos = len(_hablantes_en_orden(resultado.parrafos))
+            consola.print()
+            if _quiere_poner_nombres(menu, cuantos):
+                sugerencias = _sugerir_por_voz(resultado.huellas, {}, resultado.parrafos)
+                mapa = _escuchar_y_nombrar(resultado.parrafos, {}, resultado.audio_path, sugerencias)
                 if mapa:
+                    # Solo lo confirmado: si cortó a mitad (Ctrl+C), nada llega aquí y no se guarda nada
+                    _guardar_voces(mapa, resultado.huellas, resultado.json_path)
                     _, resultado.parrafos = procesador.renombrar_hablantes(resultado.json_path, mapa)
+                    _recordar_personas(mapa.values())
         except (KeyboardInterrupt, EOFError):
-            consola.print("\n[yellow]Nombres sin terminar.[/] Puedes retomarlo luego con [cyan]transcriptor nombres -e[/].")
+            if desde_menu:
+                consola.print("\n[yellow]Nombres sin terminar.[/] Puedes terminarlo luego en «Cambiar nombres de hablantes».")
+            else:
+                consola.print("\n[yellow]Nombres sin terminar.[/] Puedes retomarlo luego con [cyan]transcriptor nombres -e[/].")
 
-    _mostrar_resumen(resultado, time.monotonic() - inicio)
+    _mostrar_resumen(resultado, time.monotonic() - inicio, desde_menu)
     _anotar_en_historial(resultado)
     return resultado
 
@@ -222,6 +262,8 @@ def poner_nombres(
     Si editaste los nombres directamente en el [cyan].blocks.json[/], sin lista rehace el .txt con ellos.
     """
     _configurar_logs(detalle=False)
+    global ultimo_error
+    ultimo_error = None
 
     archivo = archivo.expanduser()
     if archivo.suffix != ".json" or not archivo.exists():
@@ -240,8 +282,12 @@ def poner_nombres(
     try:
         if escuchar:
             datos = procesador.leer_transcripcion(archivo)
-            mapa_nombres = _escuchar_y_nombrar(datos["parrafos"], datos["nombres"], datos["audio"])
+            sugerencias = _sugerir_por_voz(datos["huellas"], datos["nombres"], datos["parrafos"])
+            mapa_nombres = _escuchar_y_nombrar(datos["parrafos"], datos["nombres"], datos["audio"], sugerencias)
         txt_path, parrafos = procesador.renombrar_hablantes(archivo, mapa_nombres)
+        _recordar_personas(mapa_nombres.values())
+        if mapa_nombres:
+            _guardar_voces_del_json(archivo, procesador)
     except (KeyboardInterrupt, EOFError):
         consola_err.print("\n[yellow]Cancelado. No se cambió nada.[/]")
         raise typer.Exit(130)
@@ -278,9 +324,89 @@ def _es_interactivo() -> bool:
     return sys.stdin.isatty() and consola.is_terminal
 
 
-def _confirmar(pregunta: str) -> bool:
-    respuesta = consola.input(f"{pregunta} [bold][S/n][/] ").strip().lower()
-    return respuesta in ("", "s", "si", "sí", "y", "yes")
+def _recordar_personas(nombres):
+    """Guarda los nombres usados para ofrecerlos la próxima vez. Un fallo aquí nunca debe romper nada."""
+    try:
+        from src import historial
+        historial.recordar_personas(list(nombres))
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No se pudieron recordar las personas: {e}")
+
+
+def _reconocer_voces_activo() -> bool:
+    """¿Está encendido «Reconocer voces»? Ante cualquier fallo, no (nada de esto debe romper)."""
+    try:
+        from src import ajustes
+        return bool(ajustes.valor("reconocer_voces"))
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No se pudo leer el ajuste de reconocer voces: {e}")
+        return False
+
+
+def _sugerir_por_voz(huellas: Optional[dict], nombres_actuales: dict, parrafos: list) -> dict:
+    """
+    {etiqueta: nombre} con las personas que la voz recuerda, solo para quien aún tiene nombre genérico
+    ("Hablante N"). Avisa en gris a quiénes reconoció. Son solo propuestas: se confirman al escucharlas.
+    Vacío si el ajuste está apagado, no hay huellas o algo falla.
+    """
+    if not huellas or not _reconocer_voces_activo():
+        return {}
+    try:
+        from src import voces
+        from src.diarizer import ETIQUETA_GENERICA
+        en_la_charla = set(_hablantes_en_orden(parrafos))
+        sugerencias = {}
+        for etiqueta, (nombre, _) in voces.parecidos(huellas).items():
+            actual = nombres_actuales.get(etiqueta, etiqueta)
+            if etiqueta in en_la_charla and actual.startswith(f"{ETIQUETA_GENERICA} ") and actual[len(ETIQUETA_GENERICA) + 1:].isdigit():
+                sugerencias[etiqueta] = nombre
+        if sugerencias:
+            # En el orden en que aparecen en la charla
+            nombres = [sugerencias[e] for e in _hablantes_en_orden(parrafos) if e in sugerencias]
+            consola.print(f"[dim]Reconocí por la voz a: {', '.join(nombres)}. Confírmalo al escuchar a cada uno.[/]")
+        return sugerencias
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No se pudo reconocer por la voz: {e}")
+        return {}
+
+
+def _guardar_voces(nombres: dict, huellas: Optional[dict], json_path: Optional[Path] = None):
+    """
+    Guarda la huella de voz de quienes ya tienen nombre ({etiqueta: nombre} completo), para
+    reconocerlos la próxima vez. Con json_path cada huella sabe de dónde viene: volver a guardar
+    no la suma dos veces y, si se corrigió un nombre, se quita de la persona equivocada.
+    Un fallo aquí nunca debe romper nada.
+    """
+    if not nombres or not huellas or not _reconocer_voces_activo():
+        return
+    try:
+        from src import voces
+        fuente = str(Path(json_path).expanduser().resolve()) if json_path else None
+        voces.recordar_nombrados(nombres, huellas, fuente)
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No se pudieron guardar las voces: {e}")
+
+
+def _guardar_voces_del_json(json_path: Path, procesador):
+    """Tras aplicar nombres a un .blocks.json: guarda las voces con los nombres que quedaron (los del .json
+    más los nuevos). Si se repite un nombre («la misma persona que…»), se guardan las dos huellas."""
+    if not _reconocer_voces_activo():
+        return
+    try:
+        datos = procesador.leer_transcripcion(json_path)
+        _guardar_voces(datos["nombres"], datos["huellas"], json_path)
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No se pudieron guardar las voces: {e}")
+
+
+def _quiere_poner_nombres(menu, cuantos: int) -> bool:
+    """Pregunta (con flechas) si quiere ponerles nombre. Esc o «Ahora no» es que no."""
+    mensaje = ("Se detectó 1 hablante. ¿Le pongo nombre?" if cuantos == 1
+               else f"Se detectaron {cuantos} hablantes. ¿Les pongo nombre?")
+    try:
+        return menu.elegir(mensaje, [("Sí, escucharlos y ponerles nombre", True)], texto_volver="Ahora no")
+    except menu.Atras:
+        return False
 
 
 def _hablantes_en_orden(parrafos: list) -> list:
@@ -291,11 +417,48 @@ def _hablantes_en_orden(parrafos: list) -> list:
     return hablantes
 
 
-def _escuchar_y_nombrar(parrafos: list, nombres_actuales: dict, audio: Optional[Path]) -> dict:
+# Valores de las listas de _escuchar_y_nombrar
+_NOMBRE, _REPETIR, _OTRO_FRAGMENTO, _MISMA, _SUGERIDO = "nombre", "repetir", "otro_fragmento", "misma", "sugerido"
+_OTRO_NOMBRE = "otro_nombre"
+
+
+def _validar_nombre(texto: str):
+    return True if texto.strip() else "Escribe un nombre."
+
+
+def _pedir_nombre(menu, ocupados: set) -> str:
     """
-    Para cada hablante muestra lo que dice y reproduce un fragmento de su voz; luego pregunta su nombre.
+    Con personas guardadas: lista con ellas (menos las ya usadas en esta transcripción) y «Otro nombre…».
+    Sin personas: directo a escribir. Esc (menu.Atras) sube a quien llama.
+    """
+    try:
+        from src import historial
+        guardadas = [p for p in historial.personas() if p not in ocupados]
+    except Exception:
+        guardadas = []
+    if guardadas:
+        eleccion = menu.elegir("¿Cómo se llama?", [*guardadas, ("Otro nombre…", _OTRO_NOMBRE)])
+        if eleccion != _OTRO_NOMBRE:
+            return eleccion
+    return menu.texto("Nombre:", validar=_validar_nombre).strip()
+
+
+def _escuchar_y_nombrar(parrafos: list, nombres_actuales: dict, audio: Optional[Path],
+                        sugerencias: Optional[dict] = None) -> dict:
+    """
+    Para cada hablante muestra lo que dice, reproduce un fragmento de su voz y pregunta con flechas quién es.
     parrafos lleva las etiquetas originales ("Hablante 1"...). Retorna {etiqueta: nombre} con lo que cambió.
+
+    Punto de extensión (reconocimiento de voz): sugerencias es {etiqueta: nombre}. Si hay una para un
+    hablante, la primera opción de su lista (y la elegida por defecto) es «Es <nombre>»; el resto queda igual.
+    Sin sugerencias (None) no cambia nada.
+
+    Esc en la lista de un hablante es «Dejar como está»; Esc en una sublista vuelve a esa lista.
+    Ctrl+C sube como KeyboardInterrupt (quien llama decide qué hacer).
     """
+    from src import menu
+
+    sugerencias = sugerencias or {}
     comando = fragmentos.comando_reproductor() if audio else None
     if audio is None:
         consola.print("[yellow]No encuentro el audio de esta transcripción; te muestro solo el texto.[/]")
@@ -309,14 +472,18 @@ def _escuchar_y_nombrar(parrafos: list, nombres_actuales: dict, audio: Optional[
             tiempos[p["speaker"]] = tiempos.get(p["speaker"], 0.0) + max(0.0, p["end"] - p["start"])
     total = sum(tiempos.values()) or 1.0
 
-    consola.print("[dim]Escribe el nombre y Enter · Enter solo: dejarlo como está · "
-                  "r: repetir el fragmento · o: escuchar otro fragmento[/]")
+    etiquetas = _hablantes_en_orden(parrafos)
     mapa = {}
+
+    def nombre_de(etiqueta):
+        return mapa.get(etiqueta, nombres_actuales.get(etiqueta, etiqueta))
+
     with tempfile.TemporaryDirectory(prefix="transcriptor-") as carpeta:
         try:
-            for etiqueta in _hablantes_en_orden(parrafos):
-                actual = nombres_actuales.get(etiqueta, etiqueta)
+            for posicion, etiqueta in enumerate(etiquetas):
+                actual = nombre_de(etiqueta)
                 opciones = fragmentos.elegir_fragmentos(parrafos, etiqueta)
+                anteriores = etiquetas[:posicion]
                 consola.print()
                 consola.rule(f"[bold]{actual}[/] · habla el {round(100 * tiempos[etiqueta] / total)} % del tiempo",
                              align="left")
@@ -330,21 +497,58 @@ def _escuchar_y_nombrar(parrafos: list, nombres_actuales: dict, audio: Optional[
                         consola.print(f"[dim][{_reloj(fragmento['start'])}][/] {texto}")
                         if reproductor:
                             _reproducir_fragmento(reproductor, audio, fragmento, Path(carpeta) / f"{etiqueta}-{indice}.wav")
-                    respuesta = consola.input(f"Nombre para [bold]{actual}[/]: ").strip()
                     mostrar = True
-                    if respuesta.lower() == "r":
+
+                    sugerido = sugerencias.get(etiqueta)
+                    # Si ese nombre ya se le dio a otro hablante en esta pasada, ya no se propone:
+                    # un Enter uniría a dos personas distintas (para eso está «Es la misma persona que…»)
+                    if sugerido in {nombre_de(e) for e in etiquetas if e != etiqueta}:
+                        sugerido = None
+                    lista = []
+                    if sugerido:
+                        lista.append((f"Es {sugerido}", _SUGERIDO))
+                    lista.append(("Ponerle nombre", _NOMBRE))
+                    if reproductor:
+                        lista.append(("Escuchar otra vez", _REPETIR))
+                    if len(opciones) > 1:
+                        lista.append(("Otro fragmento", _OTRO_FRAGMENTO))
+                    # Los anteriores con otro nombre (sin repetir): a quién más puede ser
+                    candidatos = list(dict.fromkeys(nombre_de(e) for e in anteriores if nombre_de(e) != actual))
+                    if candidatos:
+                        lista.append(("Es la misma persona que…", _MISMA))
+                    try:
+                        eleccion = menu.elegir(f"¿Quién es {actual}?", lista, defecto=lista[0][1],
+                                               texto_volver="Dejar como está")
+                    except menu.Atras:
+                        eleccion = None  # Esc / «Dejar como está»
+
+                    if eleccion == _REPETIR:
                         continue
-                    if respuesta.lower() == "o":
-                        if len(opciones) > 1:
-                            indice = (indice + 1) % len(opciones)
-                        else:
-                            consola.print("[dim]No hay más fragmentos de este hablante.[/]")
+                    if eleccion == _OTRO_FRAGMENTO:
+                        indice = (indice + 1) % len(opciones)
+                        continue
+
+                    nuevo = None
+                    if eleccion == _SUGERIDO:
+                        nuevo = sugerido
+                    elif eleccion == _NOMBRE:
+                        ocupados = {nombre_de(e) for e in etiquetas if e != etiqueta}
+                        try:
+                            nuevo = _pedir_nombre(menu, ocupados)
+                        except menu.Atras:
                             mostrar = False
-                        continue
+                            continue
+                    elif eleccion == _MISMA:
+                        try:
+                            nuevo = menu.elegir("¿Con quién?", candidatos)
+                        except menu.Atras:
+                            mostrar = False
+                            continue
+
                     if reproductor:
                         reproductor.detener()
-                    if respuesta and respuesta != actual:
-                        mapa[etiqueta] = respuesta
+                    if nuevo and nuevo != actual:
+                        mapa[etiqueta] = nuevo
                     break
         finally:
             if reproductor:
@@ -481,14 +685,17 @@ def _configurar_logs(detalle: bool):
 
 
 def _mostrar_error(e: Exception, detalle: bool):
+    global ultimo_error
     if detalle:
         consola_err.print_exception()
-    mensaje = Text(str(e) or type(e).__name__)
-    if _falta_modelo_sin_internet(e):
+    mensaje = Text(errores.mensaje_simple(e) or str(e) or type(e).__name__)
+    if _falta_modelo_sin_internet(e):  # tiene prioridad: la causa real es el modo «Sin internet»
         mensaje = Text("Está activado «Sin internet» y ese modelo todavía no está descargado. "
                        "Desactívalo en Configuración (o quita HF_HUB_OFFLINE del .env) para descargarlo.")
-    if not detalle:
-        mensaje.append("\n\nVuelve a ejecutarlo con -v para ver el detalle.", style="dim")
+    # El detalle va a un archivo para poder pedir ayuda sin abrir la terminal con -v
+    ultimo_error = errores.guardar_detalle(e)
+    if ultimo_error:
+        mensaje.append(f"\n\nEl detalle quedó guardado en {errores.ruta_corta(ultimo_error)}", style="dim")
     consola_err.print(Panel(mensaje, title="Error", title_align="left", border_style="red", expand=False))
 
 
@@ -504,7 +711,7 @@ def _falta_modelo_sin_internet(e: Exception) -> bool:
     return False
 
 
-def _mostrar_resumen(resultado, segundos: float):
+def _mostrar_resumen(resultado, segundos: float, desde_menu: bool = False):
     tabla = Table.grid(padding=(0, 2))
     tabla.add_column(style="bold")
     tabla.add_column(overflow="fold")
@@ -517,7 +724,7 @@ def _mostrar_resumen(resultado, segundos: float):
     elif resultado.json_path:
         tabla.add_row("Hablantes", _texto_hablantes(resultado.parrafos))
     tabla.add_row("Tiempo total", _duracion(segundos))
-    if resultado.json_path:
+    if resultado.json_path and not desde_menu:
         tabla.add_row("", "")
         tabla.add_row("Cambiar nombres", f'transcriptor nombres "{resultado.json_path}" -e')
 

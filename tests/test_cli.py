@@ -77,6 +77,35 @@ def test_transcribir_usa_el_modelo_por_defecto(procesar, monkeypatch):
     assert procesar.call_args.args[1] == config.DEFAULT_MODEL
 
 
+def test_el_resumen_desde_el_menu_no_nombra_comandos(procesar, capsys):
+    from src import cli
+
+    cli.ejecutar_transcripcion("clase.mp3", "turbo", hablantes=True, desde_menu=True)
+    salida = capsys.readouterr().out
+    assert "Ana (75 %), Hablante 2 (25 %)" in salida
+    assert "Cambiar nombres" not in salida and "transcriptor nombres" not in salida
+
+
+def test_el_resumen_desde_la_cli_sigue_mostrando_como_cambiar_nombres(procesar, capsys):
+    from src import cli
+
+    cli.ejecutar_transcripcion("clase.mp3", "turbo", hablantes=True)
+    assert 'transcriptor nombres' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("desde_menu, texto", [
+    (True, "«Cambiar nombres de hablantes»"), (False, "transcriptor nombres -e"),
+])
+def test_nombres_sin_terminar_segun_de_donde_se_viene(monkeypatch, procesar, capsys, desde_menu, texto):
+    from src import cli
+
+    monkeypatch.setattr(cli, "_es_interactivo", lambda: True)
+    from src import menu
+    monkeypatch.setattr(menu, "elegir", MagicMock(side_effect=KeyboardInterrupt))
+    cli.ejecutar_transcripcion("clase.mp3", "turbo", hablantes=True, desde_menu=desde_menu)
+    assert texto in " ".join(capsys.readouterr().out.split())
+
+
 def test_transcribir_con_hablantes_muestra_reparto_y_como_renombrar(procesar):
     resultado = runner.invoke(app, ["transcribir", "clase.mp3", "-d", "--num", "2", "-n", "Ana"])
 
@@ -202,58 +231,154 @@ def _transcripcion_diarizada(tmp_path):
     return audio, json_path
 
 
-def test_al_terminar_ofrece_escuchar_y_nombrar(monkeypatch, tmp_path, escucha):
-    audio, json_path = _transcripcion_diarizada(tmp_path)
-    from utils.formatters import cargar_json
+@pytest.fixture
+def preguntas(monkeypatch):
+    """
+    Simula las listas con flechas (menu.elegir) y el campo de texto (menu.texto) con respuestas en cola.
+    Para elegir, la respuesta es el TEXTO de la opción ("Ponerle nombre"); "ESC" simula la tecla Esc.
+    Registra cada pregunta en .hechas como (mensaje, [textos de las opciones], texto_volver).
+    """
+    from src import menu
 
-    def fake(entrada, modelo, al_avanzar, **kwargs):
-        al_avanzar("Transcribiendo")
-        return procesador.Resultado(audio_path=audio, txt_path=tmp_path / "charla.blocks.txt", json_path=json_path,
-                                    parrafos=cargar_json(json_path), duracion=40.0)
+    class Preguntas:
+        def __init__(self):
+            self.cola = []
+            self.hechas = []
 
-    monkeypatch.setattr(procesador, "procesar_entrada", fake)
+        def poner(self, *respuestas):
+            self.cola.extend(respuestas)
 
-    # s: sí quiero escuchar · Ana · o: otro fragmento · Luis
-    resultado = runner.invoke(app, ["transcribir", "charla.mp3", "-d"], input="s\nAna\no\nLuis\n")
+    p = Preguntas()
 
-    assert resultado.exit_code == 0, resultado.output
-    assert "Se detectaron 2 hablante(s)" in resultado.output
-    assert escucha["recortes"] == [(0, 10), (30, 5)]
-    assert (tmp_path / "charla.blocks.txt").read_text(encoding="utf-8") == (
-        "[00:00:00] Ana: Bienvenidos al programa.\n\n[00:00:30] Luis: Gracias por invitarme."
-        "\n\n[00:00:35] Ana: Un placer."
-    )
-    assert "Ana (88 %), Luis (12 %)" in resultado.output
-    assert "No hay más fragmentos" in resultado.output
+    def elegir(mensaje, opciones, defecto=None, volver=True, texto_volver=menu.VOLVER):
+        textos = [o[0] if isinstance(o, tuple) else o for o in opciones]
+        p.hechas.append((mensaje, textos, texto_volver if volver else None, defecto))
+        respuesta = p.cola.pop(0)
+        if respuesta == "ESC" or (volver and respuesta == texto_volver):
+            raise menu.Atras
+        for o in opciones:
+            if (o[0] if isinstance(o, tuple) else o) == respuesta:
+                return o[1] if isinstance(o, tuple) else o
+        raise AssertionError(f"«{respuesta}» no está entre {textos}")
+
+    def texto(mensaje, validar=None, defecto="", volver=True):
+        p.hechas.append((mensaje, "texto", None, None))
+        respuesta = p.cola.pop(0)
+        if respuesta == "ESC":
+            raise menu.Atras
+        if validar and validar(respuesta) is not True:
+            raise AssertionError(f"texto no válido: {respuesta!r}")
+        return respuesta
+
+    monkeypatch.setattr(menu, "elegir", elegir)
+    monkeypatch.setattr(menu, "texto", texto)
+    return p
 
 
-def test_al_terminar_se_puede_decir_que_no(monkeypatch, tmp_path, escucha):
+def _procesar_diarizado(monkeypatch, tmp_path):
     audio, json_path = _transcripcion_diarizada(tmp_path)
     from utils.formatters import cargar_json
 
     monkeypatch.setattr(procesador, "procesar_entrada", lambda *a, **k: procesador.Resultado(
         audio_path=audio, txt_path=tmp_path / "charla.blocks.txt", json_path=json_path,
         parrafos=cargar_json(json_path), duracion=40.0))
+    return json_path
 
-    resultado = runner.invoke(app, ["transcribir", "charla.mp3", "-d"], input="n\n")
+
+SI_NOMBRES = "Sí, escucharlos y ponerles nombre"
+
+
+def test_al_terminar_ofrece_escuchar_y_nombrar(monkeypatch, tmp_path, escucha, preguntas):
+    _procesar_diarizado(monkeypatch, tmp_path)
+
+    # Hablante 1 tiene dos fragmentos: oye el segundo y le pone Ana. Hablante 2: Luis.
+    preguntas.poner(SI_NOMBRES,
+                    "Otro fragmento", "Ponerle nombre", "Ana",
+                    "Ponerle nombre", "Luis")
+
+    resultado = runner.invoke(app, ["transcribir", "charla.mp3", "-d"])
+
+    assert resultado.exit_code == 0, resultado.output
+    primera = preguntas.hechas[0]
+    assert primera[0] == "Se detectaron 2 hablantes. ¿Les pongo nombre?"
+    assert primera[1] == [SI_NOMBRES] and primera[2] == "Ahora no"
+    assert escucha["recortes"] == [(0, 10), (35, 5), (30, 5)]
+    assert (tmp_path / "charla.blocks.txt").read_text(encoding="utf-8") == (
+        "[00:00:00] Ana: Bienvenidos al programa.\n\n[00:00:30] Luis: Gracias por invitarme."
+        "\n\n[00:00:35] Ana: Un placer."
+    )
+    assert "Ana (88 %), Luis (12 %)" in resultado.output
+    # Los nombres quedan guardados para la próxima vez
+    from src import historial
+    assert set(historial.personas()) == {"Ana", "Luis"}
+
+
+def test_al_terminar_se_puede_decir_ahora_no(monkeypatch, tmp_path, escucha, preguntas):
+    _procesar_diarizado(monkeypatch, tmp_path)
+    preguntas.poner("Ahora no")
+
+    resultado = runner.invoke(app, ["transcribir", "charla.mp3", "-d"])
 
     assert resultado.exit_code == 0, resultado.output
     assert escucha["reproducidos"] == []
     assert "Hablante 1 (88 %)" in resultado.output
+    from src import historial
+    assert historial.personas() == []
 
 
-def test_sin_preguntas_o_con_nombres_no_pregunta(procesar, escucha):
+def test_esc_en_la_pregunta_inicial_es_ahora_no(monkeypatch, tmp_path, escucha, preguntas):
+    _procesar_diarizado(monkeypatch, tmp_path)
+    preguntas.poner("ESC")
+
+    resultado = runner.invoke(app, ["transcribir", "charla.mp3", "-d"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert "Hablante 1 (88 %)" in resultado.output
+
+
+def test_sin_preguntas_o_con_nombres_no_pregunta(procesar, escucha, preguntas):
     for opciones in (["-d", "--sin-preguntas"], ["-d", "-n", "Ana"]):
         resultado = runner.invoke(app, ["transcribir", "clase.mp3", *opciones])
         assert resultado.exit_code == 0, resultado.output
         assert "Se detectaron" not in resultado.output
+    assert preguntas.hechas == []
 
 
-def test_nombres_escuchar(tmp_path, escucha):
+def test_sin_terminal_interactiva_no_pregunta(monkeypatch, tmp_path, preguntas):
+    _procesar_diarizado(monkeypatch, tmp_path)
+    # Sin la fixture `escucha`, el runner no es una terminal: cero preguntas
+    resultado = runner.invoke(app, ["transcribir", "charla.mp3", "-d"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert preguntas.hechas == []
+
+
+def test_con_nombres_dados_se_recuerdan(procesar):
+    from src import historial
+
+    resultado = runner.invoke(app, ["transcribir", "clase.mp3", "-d", "--sin-preguntas", "-n", "Ana,Luis"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert set(historial.personas()) == {"Ana", "Luis"}
+
+
+def test_un_fallo_al_recordar_no_rompe_nada(monkeypatch, procesar):
+    from src import historial
+
+    def falla(nombres):
+        raise RuntimeError("disco lleno")
+
+    monkeypatch.setattr(historial, "recordar_personas", falla)
+    resultado = runner.invoke(app, ["transcribir", "clase.mp3", "-d", "--sin-preguntas", "-n", "Ana"])
+    assert resultado.exit_code == 0, resultado.output
+
+
+def test_nombres_escuchar(tmp_path, escucha, preguntas):
     _, json_path = _transcripcion_diarizada(tmp_path)
 
-    # r: repetir · Ana · Enter: dejar "Hablante 2"
-    resultado = runner.invoke(app, ["nombres", str(json_path), "-e"], input="r\nAna\n\n")
+    # Escuchar otra vez · Ana · Dejar como está "Hablante 2"
+    preguntas.poner("Escuchar otra vez", "Ponerle nombre", "Ana", "Dejar como está")
+    resultado = runner.invoke(app, ["nombres", str(json_path), "-e"])
 
     assert resultado.exit_code == 0, resultado.output
     assert escucha["reproducidos"] == ["Hablante 1-0.wav", "Hablante 1-0.wav", "Hablante 2-0.wav"]
@@ -262,15 +387,18 @@ def test_nombres_escuchar(tmp_path, escucha):
     assert json.loads(json_path.read_text(encoding="utf-8"))["nombres"] == {"Hablante 1": "Ana"}
 
 
-def test_nombres_escuchar_sin_audio_muestra_solo_texto(tmp_path, escucha):
+def test_nombres_escuchar_sin_audio_muestra_solo_texto(tmp_path, escucha, preguntas):
     audio, json_path = _transcripcion_diarizada(tmp_path)
     audio.unlink()
 
-    resultado = runner.invoke(app, ["nombres", str(json_path), "-e"], input="Ana\nLuis\n")
+    preguntas.poner("Ponerle nombre", "Ana", "Ponerle nombre", "Luis")
+    resultado = runner.invoke(app, ["nombres", str(json_path), "-e"])
 
     assert resultado.exit_code == 0, resultado.output
     assert "No encuentro el audio" in resultado.output
     assert escucha["reproducidos"] == []
+    # Sin reproductor no se ofrece «Escuchar otra vez»
+    assert all("Escuchar otra vez" not in opciones for _, opciones, _, _ in preguntas.hechas if opciones != "texto")
 
 
 def test_nombres_escuchar_con_lista_es_error(tmp_path, escucha):
@@ -292,7 +420,8 @@ def test_error_muestra_recuadro_y_sale_con_1(monkeypatch):
 
     assert resultado.exit_code == 1
     assert "No se encontró el audio" in resultado.output
-    assert "-v" in resultado.output
+    assert "El detalle quedó guardado en" in resultado.output
+    assert "-v" not in resultado.output
 
 
 def test_sin_internet_y_modelo_no_descargado_lo_explica(monkeypatch):
@@ -444,3 +573,205 @@ def test_las_opciones_ganan_a_la_configuracion(procesar, tmp_path):
     assert resultado.exit_code == 0, resultado.output
     args, kwargs = procesar.call_args
     assert (args[1], kwargs["idioma"], kwargs["salida"]) == ("tiny", "pt", tmp_path / "otra")
+
+
+# --- _escuchar_y_nombrar: cada camino de las listas -------------------------
+
+def _tres_hablantes():
+    return [
+        {"start": 0, "end": 30, "text": "Bienvenidos.", "speaker": "Hablante 1"},
+        {"start": 30, "end": 50, "text": "Gracias.", "speaker": "Hablante 2"},
+        {"start": 50, "end": 60, "text": "Un placer.", "speaker": "Hablante 3"},
+        {"start": 60, "end": 65, "text": "Más de lo mismo.", "speaker": "Hablante 3"},
+    ]
+
+
+def _nombrar(parrafos=None, actuales=None, audio="charla.mp3", sugerencias=None):
+    from src import cli
+    return cli._escuchar_y_nombrar(parrafos or _tres_hablantes(), actuales or {},
+                                   Path(audio) if audio else None, sugerencias)
+
+
+def test_elegir_una_persona_guardada(escucha, preguntas):
+    from src import historial
+    historial.recordar_personas(["Ana", "Luis"])
+    historial.recordar_personas(["Luis"])
+    preguntas.poner("Ponerle nombre", "Luis",
+                    "Dejar como está", "Dejar como está")
+
+    assert _nombrar() == {"Hablante 1": "Luis"}
+    mensaje, opciones, _, _ = preguntas.hechas[1]
+    assert mensaje == "¿Cómo se llama?"
+    assert opciones == ["Luis", "Ana", "Otro nombre…"]  # el más usado primero
+
+
+def test_las_personas_ya_asignadas_no_se_vuelven_a_ofrecer(escucha, preguntas):
+    from src import historial
+    historial.recordar_personas(["Ana", "Luis"])
+    preguntas.poner("Ponerle nombre", "Ana",
+                    "Ponerle nombre", "Luis",
+                    "Dejar como está")
+
+    assert _nombrar() == {"Hablante 1": "Ana", "Hablante 2": "Luis"}
+    # Al segundo solo le queda Luis; Ana ya es el Hablante 1
+    assert preguntas.hechas[3][1] == ["Luis", "Otro nombre…"]
+
+
+def test_otro_nombre_y_validacion(escucha, preguntas):
+    from src import cli, historial
+    historial.recordar_personas(["Ana"])
+    preguntas.poner("Ponerle nombre", "Otro nombre…", "Marta",
+                    "Dejar como está", "Dejar como está")
+
+    assert _nombrar() == {"Hablante 1": "Marta"}
+    # Un nombre vacío no pasa la validación del campo de texto
+    assert cli._validar_nombre("   ") is not True
+    assert cli._validar_nombre("Marta") is True
+
+
+def test_sin_personas_guardadas_va_directo_a_escribir(escucha, preguntas):
+    preguntas.poner("Ponerle nombre", "Marta", "Dejar como está", "Dejar como está")
+
+    assert _nombrar() == {"Hablante 1": "Marta"}
+    assert preguntas.hechas[1][1] == "texto"
+
+
+def test_esc_al_escribir_o_elegir_nombre_vuelve_a_la_lista_del_hablante(escucha, preguntas):
+    from src import historial
+    # Sin personas: Esc al escribir
+    preguntas.poner("Ponerle nombre", "ESC", "Dejar como está", "Dejar como está", "Dejar como está")
+    assert _nombrar() == {}
+    assert preguntas.hechas[0][0] == preguntas.hechas[2][0] == "¿Quién es Hablante 1?"
+
+    # Con personas: Esc en la lista de personas y en «Otro nombre…»
+    historial.recordar_personas(["Ana"])
+    preguntas.hechas.clear()
+    preguntas.poner("Ponerle nombre", "ESC",
+                    "Ponerle nombre", "Otro nombre…", "ESC",
+                    "Ponerle nombre", "Ana",
+                    "Dejar como está", "Dejar como está")
+    assert _nombrar() == {"Hablante 1": "Ana"}
+
+
+def test_misma_persona_que_une_los_dos_en_el_texto(tmp_path, escucha, preguntas):
+    audio, json_path = _transcripcion_diarizada(tmp_path)
+    # Hablante 1 = Ana; Hablante 2 = la misma persona que Ana
+    preguntas.poner("Ponerle nombre", "Ana",
+                    "Es la misma persona que…", "Ana")
+
+    resultado = runner.invoke(app, ["nombres", str(json_path), "-e"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert preguntas.hechas[3][0] == "¿Con quién?" and preguntas.hechas[3][1] == ["Ana"]
+    texto = (tmp_path / "charla.blocks.txt").read_text(encoding="utf-8")
+    assert "Hablante" not in texto
+    assert texto.count("Ana:") == 3
+    assert json.loads(json_path.read_text(encoding="utf-8"))["nombres"] == {"Hablante 1": "Ana", "Hablante 2": "Ana"}
+
+
+def test_misma_persona_no_se_ofrece_al_primero_ni_si_todos_tienen_su_nombre(escucha, preguntas):
+    preguntas.poner("Dejar como está", "Dejar como está", "Dejar como está")
+    _nombrar()
+    assert "Es la misma persona que…" not in preguntas.hechas[0][1]
+    assert "Es la misma persona que…" in preguntas.hechas[1][1]
+
+
+def test_misma_persona_ofrece_el_nombre_nuevo_de_los_anteriores(escucha, preguntas):
+    preguntas.poner("Ponerle nombre", "Ana",
+                    "Dejar como está",
+                    "Es la misma persona que…", "Ana")
+    assert _nombrar() == {"Hablante 1": "Ana", "Hablante 3": "Ana"}
+    # Para el Hablante 3: Ana (nueva) y Hablante 2 (sin cambiar)
+    assert preguntas.hechas[-1][1] == ["Ana", "Hablante 2"]
+
+
+def test_esc_en_misma_persona_vuelve_a_la_lista(escucha, preguntas):
+    preguntas.poner("Dejar como está",
+                    "Es la misma persona que…", "ESC",
+                    "Dejar como está",
+                    "Dejar como está")
+    assert _nombrar() == {}
+    assert preguntas.hechas[1][0] == preguntas.hechas[3][0] == "¿Quién es Hablante 2?"
+
+
+def test_esc_en_la_lista_del_hablante_es_dejar_como_esta(escucha, preguntas):
+    preguntas.poner("ESC", "ESC", "ESC")
+    assert _nombrar() == {}
+    # Era una pregunta por hablante: no se abortó todo
+    assert len(preguntas.hechas) == 3
+    assert preguntas.hechas[0][2] == "Dejar como está"
+
+
+def test_escuchar_otra_vez_y_otro_fragmento(escucha, preguntas):
+    # Hablante 3 tiene dos fragmentos
+    preguntas.poner("Dejar como está", "Dejar como está",
+                    "Escuchar otra vez", "Otro fragmento", "Otro fragmento", "Dejar como está")
+    assert _nombrar() == {}
+    assert escucha["reproducidos"] == [
+        "Hablante 1-0.wav", "Hablante 2-0.wav",
+        "Hablante 3-0.wav", "Hablante 3-0.wav", "Hablante 3-1.wav", "Hablante 3-0.wav"]
+    assert "Otro fragmento" not in preguntas.hechas[0][1]  # Hablante 1 solo tiene uno
+    assert "Otro fragmento" in preguntas.hechas[2][1]
+
+
+def test_sin_audio_no_se_ofrece_escuchar_otra_vez(escucha, preguntas):
+    preguntas.poner("Dejar como está", "Dejar como está", "Dejar como está")
+    _nombrar(audio=None)
+    assert all("Escuchar otra vez" not in o for _, o, _, _ in preguntas.hechas)
+
+
+def test_poner_el_mismo_nombre_que_ya_tiene_no_cambia_nada(escucha, preguntas):
+    preguntas.poner("Ponerle nombre", "Ana", "Dejar como está", "Dejar como está")
+    assert _nombrar(actuales={"Hablante 1": "Ana"}) == {}
+
+
+def test_sugerencia_es_la_primera_opcion_y_la_de_por_defecto(escucha, preguntas):
+    preguntas.poner("Es Ana", "Dejar como está", "Ponerle nombre", "Marta")
+
+    mapa = _nombrar(sugerencias={"Hablante 1": "Ana", "Hablante 3": "Luis"})
+
+    assert mapa == {"Hablante 1": "Ana", "Hablante 3": "Marta"}
+    primera = preguntas.hechas[0]
+    assert primera[1][0] == "Es Ana" and primera[3] == "sugerido"
+    assert primera[1][1] == "Ponerle nombre"
+    # Sin sugerencia para el Hablante 2, la lista no cambia
+    assert not preguntas.hechas[1][1][0].startswith("Es ")
+    assert preguntas.hechas[2][1][0] == "Es Luis"
+
+
+def test_ctrl_c_en_las_listas_sube(escucha, monkeypatch):
+    from src import menu
+    monkeypatch.setattr(menu, "elegir", MagicMock(side_effect=KeyboardInterrupt))
+    with pytest.raises(KeyboardInterrupt):
+        _nombrar()
+
+
+def test_nombres_escuchar_recuerda_las_personas(tmp_path, escucha, preguntas):
+    from src import historial
+    _, json_path = _transcripcion_diarizada(tmp_path)
+    preguntas.poner("Ponerle nombre", "Ana", "Dejar como está")
+
+    resultado = runner.invoke(app, ["nombres", str(json_path), "-e"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert historial.personas() == ["Ana"]
+
+
+def test_nombres_con_lista_recuerda_las_personas(tmp_path):
+    from src import historial
+    _, json_path = _transcripcion_diarizada(tmp_path)
+
+    resultado = runner.invoke(app, ["nombres", str(json_path), "Ana,Luis"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert set(historial.personas()) == {"Ana", "Luis"}
+
+
+def test_no_se_propone_un_nombre_ya_dado_a_otro_hablante(escucha, preguntas):
+    # El Hablante 1 se llamó Ana a mano: para el Hablante 3 ya no se ofrece "Es Ana" (uniría a dos personas)
+    preguntas.poner("Ponerle nombre", "Ana", "Dejar como está", "Dejar como está")
+
+    _nombrar(sugerencias={"Hablante 3": "Ana"})
+
+    assert "Es Ana" not in preguntas.hechas[-1][1]
+    assert "Es la misma persona que…" in preguntas.hechas[-1][1]

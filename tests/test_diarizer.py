@@ -389,3 +389,142 @@ def test_diarizar_en_cpu_no_reintenta(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="fallo"):
         diarizar_audio(pipeline, audio)
     assert pipeline.call_count == 1
+
+
+# --- Huellas de voz (salida de pyannote.audio 4) ---
+
+class _Anotacion:
+    """Lo mínimo de pyannote.core.Annotation que usa el programa."""
+    def __init__(self, pistas):
+        self.pistas = pistas  # [(inicio, fin, etiqueta), ...]
+
+    def itertracks(self, yield_label=False):
+        return [(MagicMock(start=i, end=f), None, e) for i, f, e in self.pistas]
+
+    def labels(self):
+        return sorted({e for _, _, e in self.pistas})
+
+
+class _DiarizeOutput:
+    """Misma forma que pyannote.audio 4 (DiarizeOutput): speaker_embeddings va en el orden de
+    speaker_diarization.labels(), que puede tener hablantes que no salen en la versión exclusiva."""
+    def __init__(self, pistas, exclusivas, speaker_embeddings):
+        self.speaker_diarization = _Anotacion(pistas)
+        self.exclusive_speaker_diarization = _Anotacion(exclusivas)
+        self.speaker_embeddings = speaker_embeddings
+
+
+def _preparar_diarizacion(tmp_path, monkeypatch, salida):
+    np = pytest.importorskip("numpy")
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"")
+    audio_mlx = MagicMock()
+    audio_mlx.load_audio.return_value = np.zeros(3, dtype=np.float32)
+    audio_mlx.SAMPLE_RATE = 16000
+    monkeypatch.setitem(sys.modules, "mlx_whisper.audio", audio_mlx)
+    monkeypatch.setitem(sys.modules, "torch", _torch_falso())
+    pipeline = MagicMock(return_value=salida)
+    pipeline.device = _Dispositivo("cpu")
+    return pipeline, audio
+
+
+PISTAS = [(0.0, 2.0, "SPEAKER_01"), (2.0, 4.0, "SPEAKER_00"), (3.5, 4.5, "SPEAKER_02")]
+# SPEAKER_02 solo habla encima de otro: no sale en la versión exclusiva
+EXCLUSIVAS = [(0.0, 2.0, "SPEAKER_01"), (2.0, 4.0, "SPEAKER_00")]
+
+
+def test_diarizar_devuelve_la_huella_de_cada_hablante(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    # Filas en el orden de labels(): SPEAKER_00, SPEAKER_01, SPEAKER_02
+    embeddings = np.array([[3.0, 4.0, 0.0], [0.0, 0.0, 2.0], [1.0, 1.0, 1.0]])
+    pipeline, audio = _preparar_diarizacion(tmp_path, monkeypatch, _DiarizeOutput(PISTAS, EXCLUSIVAS, embeddings))
+
+    huellas = {}
+    turnos = diarizar_audio(pipeline, audio, huellas=huellas)
+
+    assert [t["speaker"] for t in turnos] == ["SPEAKER_01", "SPEAKER_00"]
+    # Normalizadas (largo 1), redondeadas a 5 decimales y como floats de Python (para el JSON)
+    assert huellas == {
+        "SPEAKER_00": [0.6, 0.8, 0.0],
+        "SPEAKER_01": [0.0, 0.0, 1.0],
+        "SPEAKER_02": [0.57735, 0.57735, 0.57735],
+    }
+    assert all(type(v) is float for h in huellas.values() for v in h)
+    json.dumps(huellas)
+    # pyannote 4 da los embeddings sin pedirlos: no se pasa ningún parámetro extra
+    assert "return_embeddings" not in pipeline.call_args.kwargs
+
+
+def test_diarizar_sin_pedir_huellas_sigue_igual(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    salida = _DiarizeOutput(PISTAS, EXCLUSIVAS, np.ones((3, 3)))
+    pipeline, audio = _preparar_diarizacion(tmp_path, monkeypatch, salida)
+
+    assert diarizar_audio(pipeline, audio) == [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_01"},
+        {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_00"},
+    ]
+
+
+def test_diarizar_omite_huellas_con_nan_o_de_ceros(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    # pyannote rellena con ceros cuando hay más hablantes que centroides; un embedding puede salir NaN
+    embeddings = np.array([[np.nan, 1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 2.0, 0.0]])
+    pipeline, audio = _preparar_diarizacion(tmp_path, monkeypatch, _DiarizeOutput(PISTAS, EXCLUSIVAS, embeddings))
+
+    huellas = {}
+    turnos = diarizar_audio(pipeline, audio, huellas=huellas)
+
+    assert len(turnos) == 2
+    assert huellas == {"SPEAKER_02": [0.0, 1.0, 0.0]}
+
+
+@pytest.mark.parametrize("salida", [
+    _DiarizeOutput(PISTAS, EXCLUSIVAS, None),                  # agrupación "oracle": sin centroides
+    _DiarizeOutput(PISTAS, EXCLUSIVAS, [[1.0, 0.0]]),           # no calzan con los hablantes
+    _DiarizeOutput(PISTAS, EXCLUSIVAS, "basura"),
+    _Anotacion(EXCLUSIVAS),                                    # pyannote 3 o legacy=True: solo la anotación
+], ids=["sin_embeddings", "no_calzan", "basura", "solo_anotacion"])
+def test_diarizar_sin_huellas_utiles_no_falla(tmp_path, monkeypatch, salida):
+    pipeline, audio = _preparar_diarizacion(tmp_path, monkeypatch, salida)
+
+    huellas = {}
+    turnos = diarizar_audio(pipeline, audio, huellas=huellas)
+
+    assert [t["speaker"] for t in turnos] == ["SPEAKER_01", "SPEAKER_00"]
+    assert huellas == {}
+
+
+def test_diarizar_si_leer_las_huellas_explota_sigue_sin_ellas(tmp_path, monkeypatch):
+    salida = _DiarizeOutput(PISTAS, EXCLUSIVAS, None)
+    salida.speaker_diarization = MagicMock()
+    salida.speaker_diarization.labels.side_effect = RuntimeError("raro")
+    salida.speaker_embeddings = [[1.0]]
+    pipeline, audio = _preparar_diarizacion(tmp_path, monkeypatch, salida)
+
+    huellas = {}
+    assert len(diarizar_audio(pipeline, audio, huellas=huellas)) == 2
+    assert huellas == {}
+
+
+def test_asignar_hablantes_informa_el_cambio_de_etiquetas_y_traduce_huellas():
+    from src.diarizer import traducir_huellas
+
+    segmentos = [_seg(0, 2, "Hola"), _seg(2, 4, "Qué tal")]
+    turnos = [
+        {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_03"},
+        {"start": 2.0, "end": 4.0, "speaker": "SPEAKER_00"},
+        {"start": 9.0, "end": 9.5, "speaker": "SPEAKER_01"},   # sin texto: no recibe etiqueta
+    ]
+    etiquetas = {}
+    asignar_hablantes(segmentos, turnos, etiquetas=etiquetas)
+
+    assert etiquetas == {"SPEAKER_03": "Hablante 1", "SPEAKER_00": "Hablante 2"}
+    huellas = {"SPEAKER_00": [0.0, 1.0], "SPEAKER_01": [1.0, 0.0], "SPEAKER_03": [0.6, 0.8]}
+    assert traducir_huellas(huellas, etiquetas) == {"Hablante 1": [0.6, 0.8], "Hablante 2": [0.0, 1.0]}
+
+
+def test_asignar_hablantes_sin_turnos_deja_las_etiquetas_vacias():
+    etiquetas = {}
+    asignar_hablantes([_seg(0, 1, "Hola")], [], etiquetas=etiquetas)
+    assert etiquetas == {}

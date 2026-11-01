@@ -2,6 +2,7 @@
 # Identifica quién habla y cuándo (diarización) usando pyannote.audio,
 # y cruza ese resultado con los segmentos de Whisper.
 import logging
+import math
 import os
 from pathlib import Path
 
@@ -114,11 +115,15 @@ def _hook_de_progreso(progreso):
 
 
 def diarizar_audio(pipeline, audio_path: Path, num_hablantes: int = None,
-                   min_hablantes: int = None, max_hablantes: int = None, progreso=None) -> list:
+                   min_hablantes: int = None, max_hablantes: int = None, progreso=None,
+                   huellas: dict | None = None) -> list:
     """
     Ejecuta la diarización sobre el audio.
     Retorna una lista de turnos: [{"start": float, "end": float, "speaker": str}, ...]
     progreso(fraccion, 1.0, None) se llama a medida que avanza.
+    Si se pasa un diccionario en huellas, se rellena con la huella de voz de cada hablante
+    de pyannote ({"SPEAKER_00": [floats], ...}); para pasarlas a "Hablante 1"... ver traducir_huellas.
+    Un hablante sin huella simplemente no aparece: la diarización nunca falla por esto.
     """
     if not audio_path.exists():
         raise FileNotFoundError(f"No se encontró el audio en: {audio_path}")
@@ -164,7 +169,75 @@ def diarizar_audio(pipeline, audio_path: Path, num_hablantes: int = None,
         for turno, _, hablante in anotacion.itertracks(yield_label=True)
     ]
     logger.info(f"Diarización completa: {len({t['speaker'] for t in turnos})} hablante(s) detectado(s).")
+    if huellas is not None:
+        huellas.update(_extraer_huellas(resultado))
     return turnos
+
+
+# Decimales que se guardan de cada huella: la huella va normalizada (largo 1), así que cada
+# valor ronda ±0,06 y 5 decimales sobran para comparar voces sin inflar el .json.
+DECIMALES_HUELLA = 5
+
+
+def _extraer_huellas(resultado) -> dict:
+    """
+    Saca la huella de voz de cada hablante de la salida de pyannote: {"SPEAKER_00": [floats], ...}.
+
+    Lo que hace pyannote.audio 4 (revisado en 4.0.7, pipelines/speaker_diarization.py):
+    SpeakerDiarization.apply devuelve un DiarizeOutput con speaker_diarization,
+    exclusive_speaker_diarization y speaker_embeddings, sin pasar ningún parámetro
+    (el return_embeddings de pyannote 3 ya no existe). speaker_embeddings es un np.ndarray
+    (num_hablantes, dimensión) ordenado como speaker_diarization.labels(); las dos anotaciones
+    usan las mismas etiquetas. Cada fila es el centroide del hablante: el promedio (sin normalizar)
+    de los embeddings de sus trozos de audio, en el mismo espacio que compara la agrupación con
+    coseno. En community-1 el modelo de embeddings debería ser WeSpeaker ResNet34 (256 valores);
+    eso está en la configuración del modelo en Hugging Face y no se pudo revisar aquí.
+    Casos sin huella: speaker_embeddings es None (agrupación "oracle"); hay filas de ceros
+    cuando hay más hablantes que centroides; un embedding puede salir NaN; y con legacy=True
+    (o pyannote 3) la salida es solo una Annotation, sin embeddings.
+    """
+    try:
+        anotacion = getattr(resultado, "speaker_diarization", None)
+        embeddings = getattr(resultado, "speaker_embeddings", None)
+        if anotacion is None or embeddings is None:
+            return {}
+        etiquetas = list(anotacion.labels())
+        filas = embeddings.tolist() if hasattr(embeddings, "tolist") else list(embeddings)
+        # Si no calzan, no sabemos qué fila es de quién: mejor ninguna huella que una equivocada
+        if len(filas) != len(etiquetas):
+            logger.warning("Las huellas de voz no calzan con los hablantes; se omiten.")
+            return {}
+        huellas = {}
+        for etiqueta, fila in zip(etiquetas, filas):
+            huella = normalizar_huella(fila)
+            if huella is not None:
+                huellas[etiqueta] = [round(v, DECIMALES_HUELLA) for v in huella]
+        return huellas
+    except Exception as e:
+        logger.warning(f"No se pudieron leer las huellas de voz ({e}); se sigue sin ellas.")
+        return {}
+
+
+def normalizar_huella(vector) -> list | None:
+    """El vector con largo 1, o None si no sirve como huella (vacío, con NaN/infinito o todo ceros)."""
+    try:
+        valores = [float(v) for v in vector]
+    except (TypeError, ValueError):
+        return None
+    if not valores or not all(math.isfinite(v) for v in valores):
+        return None
+    largo = math.sqrt(sum(v * v for v in valores))
+    if largo == 0:
+        return None
+    return [v / largo for v in valores]
+
+
+def traducir_huellas(huellas: dict, etiquetas: dict) -> dict:
+    """
+    Pasa las huellas de las etiquetas de pyannote ("SPEAKER_00") a las del programa ("Hablante 1"),
+    con el mapa que deja asignar_hablantes. Un hablante sin texto no tiene etiqueta y se omite.
+    """
+    return {etiquetas[original]: huella for original, huella in huellas.items() if original in etiquetas}
 
 
 # Una frase solo se parte entre dos hablantes si cada parte tiene al menos estas palabras.
@@ -175,7 +248,7 @@ MIN_PALABRAS_POR_TURNO = 4
 PAUSA_ENTRE_FRASES = 0.5
 
 
-def asignar_hablantes(segmentos: list, turnos: list) -> list:
+def asignar_hablantes(segmentos: list, turnos: list, etiquetas: dict | None = None) -> list:
     """
     Asigna un hablante a cada frase.
     Si los segmentos traen la hora de cada palabra ("words"), el texto se rehace en frases
@@ -185,6 +258,7 @@ def asignar_hablantes(segmentos: list, turnos: list) -> list:
     Un segmento sin palabras va entero al hablante con más tiempo solapado; si no se solapa
     con ningún turno, al turno más cercano.
     Los hablantes se renombran como "Hablante 1", "Hablante 2"... en orden de aparición.
+    Si se pasa un diccionario en etiquetas, se rellena con ese cambio: {"SPEAKER_03": "Hablante 1", ...}.
     Retorna una lista nueva de segmentos, uno por frase.
     """
     if not turnos:
@@ -204,11 +278,13 @@ def asignar_hablantes(segmentos: list, turnos: list) -> list:
     resultado.extend(_frases_con_hablante(palabras, turnos))
 
     # Etiquetas legibles y estables: el primero que habla es "Hablante 1"
-    etiquetas = {}
+    mapa = {}
     for seg in resultado:
-        if seg["speaker"] not in etiquetas:
-            etiquetas[seg["speaker"]] = f"{ETIQUETA_GENERICA} {len(etiquetas) + 1}"
-        seg["speaker"] = etiquetas[seg["speaker"]]
+        if seg["speaker"] not in mapa:
+            mapa[seg["speaker"]] = f"{ETIQUETA_GENERICA} {len(mapa) + 1}"
+        seg["speaker"] = mapa[seg["speaker"]]
+    if etiquetas is not None:
+        etiquetas.update(mapa)
 
     return resultado
 

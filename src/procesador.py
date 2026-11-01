@@ -2,17 +2,19 @@
 # Orquesta el flujo completo sin escribir en pantalla.
 # Quien lo llama (la CLI) decide cómo mostrar el avance y el resultado.
 import logging
-from dataclasses import dataclass
+from datetime import date
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from src.config import HF_TOKEN, DIARIZATION_MODEL, DIARIZATION_DEVICE
-from src.diarizer import cargar_pipeline, diarizar_audio, asignar_hablantes, aplicar_nombres
+from src.diarizer import cargar_pipeline, diarizar_audio, asignar_hablantes, aplicar_nombres, traducir_huellas
 from src.downloader import descargar_audio
 from src.transcriber import transcribir_audio, agrupar_segmentos_en_parrafos
 from src.fragmentos import buscar_audio
 from src.repeticiones import limpiar_segmentos, limpiar_parrafos
-from utils.formatters import guardar_txt_con_timestamps, guardar_json, cargar_transcripcion
+from utils.formatters import (guardar_txt_con_timestamps, guardar_json, cargar_transcripcion, a_fecha,
+                              encabezado_de_transcripcion, nombre_de_archivo_seguro)
 from utils.validators import es_url
 
 # Configuramos el registro de eventos para este archivo
@@ -28,10 +30,31 @@ class Resultado:
     parrafos: list             # ya con los nombres aplicados
     duracion: float            # segundos de audio transcritos
     error_hablantes: Optional[str] = None  # por qué falló la diarización, si falló
+    # Huella de voz de cada hablante, {"Hablante 1": [floats]}, para proponer nombres (src/voces.py)
+    huellas: dict = field(default_factory=dict)
 
 
 def _sin_aviso(paso: str):
     pass
+
+
+def _encabezado(titulo, fecha, duracion, parrafos) -> str:
+    """El encabezado del .txt, o "" si la transcripción no tiene título (Grabador, .json antiguos)."""
+    if titulo is None:
+        return ""
+    return encabezado_de_transcripcion(titulo, fecha, duracion, parrafos)
+
+
+def _ruta_libre(carpeta: Path, base: str) -> Path:
+    """
+    carpeta/"<base>.blocks.txt"; si ya existe (o su .json), "<base> (2).blocks.txt", "(3)"...
+    para no pisar una transcripción anterior.
+    """
+    n, nombre = 1, base
+    while (carpeta / f"{nombre}.blocks.txt").exists() or (carpeta / f"{nombre}.blocks.json").exists():
+        n += 1
+        nombre = f"{base} ({n})"
+    return carpeta / f"{nombre}.blocks.txt"
 
 
 def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres: dict = None,
@@ -40,7 +63,8 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
                      al_avanzar: Callable[[str], None] = _sin_aviso,
                      al_fallar: Callable[[str], None] = _sin_aviso,
                      al_progresar: Optional[Callable] = None,
-                     silenciar_motores: bool = False) -> Resultado:
+                     silenciar_motores: bool = False, titulo: Optional[str] = None,
+                     fecha: Optional[date | str] = None) -> Resultado:
     """
     Controla el flujo principal del programa:
     Descarga -> Transcripción -> (Diarización) -> Agrupación -> Guardado.
@@ -51,8 +75,15 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
     al_fallar recibe el error si falla la diarización: la transcripción se guarda igual, sin hablantes.
     silenciar_motores oculta la salida propia de yt-dlp y mlx-whisper.
     carpeta_descargas es dónde guardar el audio de una URL (por defecto, DOWNLOAD_DIR del .env).
+    titulo y fecha (la de la grabación; hoy si falta) vienen del menú: con título el archivo se llama
+    "<AAAA-MM-DD> <Título>.blocks.txt" y el .txt lleva encabezado. Sin título todo queda como siempre
+    (<nombre del audio>.blocks.txt, sin encabezado).
     """
     nombres = nombres or {}
+    if titulo is not None:
+        # El título visible conserva sus signos (¿Qué pasó?); solo el nombre del archivo se sanea
+        titulo = " ".join(titulo.split()) or "Reunión"
+        fecha = a_fecha(fecha) or date.today()
 
     # Cargamos la diarización antes de transcribir para fallar rápido si falta el token
     pipeline = None
@@ -87,23 +118,29 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
     # Por defecto junto al audio; con salida, en esa carpeta. (.mp3 -> .blocks.txt)
     carpeta = Path(salida).expanduser() if salida else audio_path.parent
     carpeta.mkdir(parents=True, exist_ok=True)
-    txt_path = carpeta / f"{audio_path.stem}.blocks.txt"
+    if titulo is None:
+        txt_path = carpeta / f"{audio_path.stem}.blocks.txt"
+    else:
+        txt_path = _ruta_libre(carpeta, f"{fecha.isoformat()} {nombre_de_archivo_seguro(titulo)}")
     json_path = None
     error_hablantes = None
+    huellas = {}
 
     logger.info("Agrupando los segmentos en párrafos legibles...")
     # Esta función procesa la lista cruda y la divide según las pausas y puntos.
     parrafos = limpiar_parrafos(agrupar_segmentos_en_parrafos(segmentos))
-    guardar_txt_con_timestamps(parrafos, txt_path)
+    guardar_txt_con_timestamps(parrafos, txt_path, _encabezado(titulo, fecha, duracion, parrafos))
 
     # PASO 4 (opcional): identificar hablantes y re-escribir el TXT con sus nombres
     if pipeline is not None:
         al_avanzar("Identificando hablantes")
         try:
+            huellas_pyannote, etiquetas = {}, {}
             turnos = diarizar_audio(pipeline, audio_path, num_hablantes, min_hablantes, max_hablantes,
-                                    progreso=al_progresar)
+                                    progreso=al_progresar, huellas=huellas_pyannote)
             # Copias: si algo falla a medias, los segmentos originales quedan intactos
-            con_hablantes = asignar_hablantes([dict(s) for s in segmentos], turnos)
+            con_hablantes = asignar_hablantes([dict(s) for s in segmentos], turnos, etiquetas=etiquetas)
+            huellas = traducir_huellas(huellas_pyannote, etiquetas)
         except Exception as e:
             error_hablantes = str(e) or type(e).__name__
             logger.info(f"No se pudo identificar a los hablantes; la transcripción se guardó sin ellos. Motivo: {error_hablantes}")
@@ -113,9 +150,10 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
             parrafos = limpiar_parrafos(agrupar_segmentos_en_parrafos(con_hablantes))
             # El JSON guarda las etiquetas genéricas para poder renombrar después sin re-procesar
             json_path = txt_path.with_suffix(".json")
-            guardar_json(parrafos, json_path, audio=audio_path.resolve(), nombres=nombres)
+            guardar_json(parrafos, json_path, audio=audio_path.resolve(), nombres=nombres, huellas=huellas,
+                         titulo=titulo, fecha=fecha, duracion=duracion)
             parrafos = aplicar_nombres(parrafos, nombres)
-            guardar_txt_con_timestamps(parrafos, txt_path)
+            guardar_txt_con_timestamps(parrafos, txt_path, _encabezado(titulo, fecha, duracion, parrafos))
 
     logger.info("Proceso completado con éxito.")
 
@@ -126,12 +164,14 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
         parrafos=parrafos,
         duracion=duracion,
         error_hablantes=error_hablantes,
+        huellas=huellas,
     )
 
 
 def leer_transcripcion(json_path: Path) -> dict:
     """
-    Lee un .blocks.json: {"audio": Path o None, "nombres": dict, "parrafos": list (etiquetas originales)}.
+    Lee un .blocks.json: {"audio": Path o None, "nombres": dict, "parrafos": list (etiquetas originales),
+    "huellas": dict (vacío si el .json es antiguo)}.
     Si el audio no está donde se guardó (o el .json es antiguo), lo busca junto al .json.
     """
     datos = cargar_transcripcion(json_path)
@@ -150,9 +190,12 @@ def renombrar_hablantes(json_path: Path, nombres: dict) -> tuple:
     datos = cargar_transcripcion(json_path)
     mapa = {**datos["nombres"], **nombres}
     if mapa != datos["nombres"]:
-        guardar_json(datos["parrafos"], json_path, audio=datos["audio"], nombres=mapa)
+        guardar_json(datos["parrafos"], json_path, audio=datos["audio"], nombres=mapa, huellas=datos["huellas"],
+                     titulo=datos["titulo"], fecha=datos["fecha"], duracion=datos["duracion"])
     parrafos = aplicar_nombres(datos["parrafos"], mapa)
     txt_path = json_path.with_suffix(".txt")
-    guardar_txt_con_timestamps(parrafos, txt_path)
+    # Los .json con título rehacen el encabezado con los participantes ya con nombre; los demás, sin encabezado
+    guardar_txt_con_timestamps(parrafos, txt_path,
+                               _encabezado(datos["titulo"], datos["fecha"], datos["duracion"], parrafos))
     logger.info("Nombres aplicados con éxito.")
     return txt_path, parrafos

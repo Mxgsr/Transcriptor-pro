@@ -4,7 +4,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import ANY, MagicMock
 
 import pytest
 import typer
@@ -116,12 +116,11 @@ def audio(tmp_path):
 # --- Transcribir --------------------------------------------------------------
 
 def test_transcribir_con_hablantes(guion, instalado, comandos, audio):
+    ajustes.guardar(modelo="turbo")
     guion(
-        ("¿De dónde viene?", "archivo"),
-        ("Arrastra el archivo", str(audio).replace(" ", "\\ ")),  # como lo deja la Terminal al arrastrar
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Identifico quién habla?", True),
-        ("¿Cuántas personas hablan?", "3"),
+        ("Arrastra el archivo o pega el enlace", str(audio).replace(" ", "\\ ")),  # como lo deja la Terminal al arrastrar
+        ("¿Identifico quién habla?", "3"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "salir"),
     )
@@ -130,39 +129,44 @@ def test_transcribir_con_hablantes(guion, instalado, comandos, audio):
 
     comandos.transcribir.assert_called_once_with(
         entrada=str(audio), modelo="turbo", hablantes=True, num=3, minimo=None, idioma="es", salida=None,
-        carpeta_descargas=Path("downloads"))
-    assert historial.preferencias() == {
-        "origen": "archivo", "modelo": "turbo", "hablantes": True, "cuantos": "3"}
+        carpeta_descargas=Path("downloads"), desde_menu=True,
+        titulo="Reunión de prueba", fecha=ANY)
+    assert historial.preferencias() == {"modelo": "turbo", "hablantes": True, "cuantos": "3"}
 
 
 def test_transcribir_ofrece_lo_ultimo_que_elegiste(guion, instalado, comandos):
+    # "origen" es de una versión anterior: se ignora sin romper
     historial.guardar_preferencias(origen="enlace", modelo="large", hablantes=False)
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
+        ("¿Empiezo?", "mas"),
+        ("¿Qué quieres cambiar?", "modelo"),
         ("¿Qué modelo uso?", "large"),
-        ("¿Identifico quién habla?", False),
+        ("¿Qué quieres cambiar?", menu.Atras),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
 
     assert menu.flujo_transcribir() is True
 
-    assert guion.defecto_de("¿De dónde viene?") == "enlace"
+    assert guion.defecto_de("¿Identifico quién habla?") == menu.NO_IDENTIFICAR
     assert guion.defecto_de("¿Qué modelo uso?") == "large"
-    assert guion.defecto_de("¿Identifico quién habla?") is False
     comandos.transcribir.assert_called_once_with(
         entrada="https://youtu.be/abc", modelo="large", hablantes=False, num=None, minimo=None,
-        idioma="es", salida=None, carpeta_descargas=Path("downloads"))
+        idioma="es", salida=None, carpeta_descargas=Path("downloads"), desde_menu=True,
+        titulo="Reunión de prueba", fecha=ANY)
 
 
 def test_mas_opciones_cambia_idioma_y_carpeta(guion, instalado, comandos, audio, tmp_path):
     guion(
-        ("¿De dónde viene?", "archivo"),
-        ("Arrastra el archivo", f'"{audio}"'),
-        ("¿Qué modelo uso?", "small"),
-        ("¿Identifico quién habla?", False),
+        ("Arrastra el archivo o pega el enlace", f'"{audio}"'),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "mas"),
+        ("¿Qué quieres cambiar?", "modelo"),
+        ("¿Qué modelo uso?", "small"),
         ("¿Qué quieres cambiar?", "idioma"),
         ("¿En qué idioma", "otro"),
         ("Código del idioma", "JA"),
@@ -178,16 +182,18 @@ def test_mas_opciones_cambia_idioma_y_carpeta(guion, instalado, comandos, audio,
     _, opciones = comandos.transcribir.call_args
     assert opciones["idioma"] == "ja"
     assert opciones["salida"] == tmp_path
-    # El idioma no se recuerda: la próxima vez vuelve a ser español
+    assert opciones["modelo"] == "small"
+    # Modelo e idioma son solo para esta vez: el de Configuración (el que usa el Grabador) no cambia
+    assert "modelo" not in historial.preferencias()
+    assert ajustes.valor("modelo") != "small"
     assert "idioma" not in historial.preferencias()
 
 
 def test_cancelar_no_transcribe_ni_guarda_preferencias(guion, instalado, comandos):
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Identifico quién habla?", False),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "cancelar"),
     )
 
@@ -199,9 +205,8 @@ def test_cancelar_no_transcribe_ni_guarda_preferencias(guion, instalado, comando
 def test_sin_diarizacion_instalada_no_pregunta_por_hablantes(guion, instalado, comandos, capsys):
     instalado.update({"pyannote.audio": False})
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
@@ -209,16 +214,17 @@ def test_sin_diarizacion_instalada_no_pregunta_por_hablantes(guion, instalado, c
     menu.flujo_transcribir()
 
     assert comandos.transcribir.call_args.kwargs["hablantes"] is False
-    assert 'uv pip install -e ".[diarizacion]"' in " ".join(capsys.readouterr().out.split())
+    # Al transcribir no se avisa de instalaciones: eso queda en Configuración
+    salida = capsys.readouterr().out
+    assert "instalador" not in salida and "uv pip" not in salida
 
 
 def test_si_la_transcripcion_falla_vuelve_al_menu(guion, instalado, comandos):
     comandos.transcribir.side_effect = typer.Exit(1)
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Identifico quién habla?", False),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "empezar"),
     )
 
@@ -237,6 +243,91 @@ def test_el_modelo_del_env_aparece_aunque_no_este_en_la_lista(monkeypatch):
 ])
 def test_numero_de_hablantes(cuantos, esperado):
     assert menu.numero_de_hablantes(cuantos) == esperado
+
+
+def test_un_solo_campo_para_archivo_o_enlace(audio, tmp_path):
+    validar = menu._validar_archivo_o_enlace
+    assert validar("https://youtu.be/x") is True
+    assert validar(str(audio)) is True
+    assert validar("   ") is not True
+    assert validar("youtu.be/x") == "No encuentro ese archivo."
+    assert "carpeta" in validar(str(tmp_path))
+
+
+def test_el_enlace_se_usa_tal_cual_y_el_archivo_se_limpia(guion, instalado, comandos, audio):
+    ajustes.guardar(modo_hablantes=ajustes.NUNCA)
+    guion(
+        ("Arrastra el archivo o pega el enlace", f"'{audio}'"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+    menu.flujo_transcribir()
+    assert comandos.transcribir.call_args.kwargs["entrada"] == str(audio)
+
+
+def test_hablantes_preguntar_ofrece_no_identificar_y_recuerda(guion, instalado, comandos):
+    historial.guardar_preferencias(hablantes=True, cuantos="4")
+    guion(
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Identifico quién habla?", "5 o más"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+    menu.flujo_transcribir()
+    valores = [v for _, v in guion.opciones_de("¿Identifico")]
+    assert valores == [menu.NO_IDENTIFICAR, menu.NO_LO_SE, "2", "3", "4", "5 o más"]
+    assert guion.defecto_de("¿Identifico") == "4"
+    kw = comandos.transcribir.call_args.kwargs
+    assert (kw["hablantes"], kw["num"], kw["minimo"]) == (True, None, 5)
+    assert historial.preferencias()["hablantes"] is True
+    assert historial.preferencias()["cuantos"] == "5 o más"
+
+
+def test_hablantes_siempre_solo_pregunta_cuantos(guion, instalado, comandos):
+    ajustes.guardar(modo_hablantes=ajustes.SIEMPRE)
+    guion(
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Cuántas personas hablan?", menu.NO_LO_SE),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+    menu.flujo_transcribir()
+    assert menu.NO_IDENTIFICAR not in guion.opciones_de("¿Cuántas")
+    kw = comandos.transcribir.call_args.kwargs
+    assert (kw["hablantes"], kw["num"], kw["minimo"]) == (True, None, None)
+
+
+def test_hablantes_nunca_no_pregunta(guion, instalado, comandos):
+    ajustes.guardar(modo_hablantes=ajustes.NUNCA)
+    guion(
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+    menu.flujo_transcribir()
+    assert comandos.transcribir.call_args.kwargs["hablantes"] is False
+
+
+def test_elegir_transcripcion_con_hablantes_acepta_el_txt_si_existe_el_json(guion, comandos, tmp_path):
+    comandos.transcribir(hablantes=True)
+    assert menu._validar_con_hablantes(str(comandos.txt)) is True
+    assert menu._validar_con_hablantes(str(comandos.json)) is True
+    solo = tmp_path / "solo.blocks.txt"
+    solo.write_text("[00:00:00] Hola\n", encoding="utf-8")
+    assert "hablantes" in menu._validar_con_hablantes(str(solo))
+    guion(("Arrastra la transcripción", str(comandos.txt)))
+    assert menu.elegir_transcripcion("¿Cuál?", solo_con_hablantes=True) == comandos.json
+
+
+def test_el_menu_no_menciona_comandos_ni_archivos_tecnicos(guion, comandos, con_historial):
+    guion(("¿A cuál le cambio los nombres?", 0))
+    guion(("¿Cómo?", "lista"), ("Nombres en orden de aparición", "Ana, Luis"), ("¿Y ahora?", "menu"))
+    menu.flujo_nombres()
+    assert [v for _, v in guion.opciones_de("¿Cómo?")] == ["escuchar", "lista"]
 
 
 # --- Nombres y Mis transcripciones ------------------------------------
@@ -274,7 +365,7 @@ def test_nombres_solo_ofrece_las_que_tienen_hablantes(guion, instalado, comandos
     sin_hablantes = tmp_path / "solo-texto.blocks.txt"
     sin_hablantes.write_text("[00:00:00] Hola\n", encoding="utf-8")
     historial.registrar(sin_hablantes)
-    guion(("Arrastra el .blocks.json", KeyboardInterrupt))
+    guion(("Arrastra la transcripción", KeyboardInterrupt))
 
     with pytest.raises(KeyboardInterrupt):
         menu.flujo_nombres()
@@ -363,9 +454,7 @@ def test_validaciones(audio, tmp_path):
     assert menu._validar_archivo(str(audio)) is True
     assert menu._validar_archivo(str(tmp_path / "no.mp3")) == "No encuentro ese archivo."
     assert "carpeta" in menu._validar_archivo(str(tmp_path))
-    assert "blocks.json" in menu._validar_transcripcion(str(audio))
-    assert menu._validar_enlace("https://youtu.be/x") is True
-    assert menu._validar_enlace("youtu.be/x") is not True
+    assert ".blocks.txt" in menu._validar_transcripcion(str(audio))
     assert menu._validar_nombres("Ana, Luis") is True
     assert menu._validar_nombres("  ") is not True
     assert menu._validar_carpeta("") is True
@@ -488,7 +577,9 @@ def test_configuracion_avisa_si_falta_instalar_algo(guion, instalado, capsys):
 
     menu.flujo_configuracion()
 
-    assert 'uv pip install -e ".[diarizacion]"' in " ".join(capsys.readouterr().out.split())
+    salida = " ".join(capsys.readouterr().out.split())
+    assert "falta un componente. Vuelve a ejecutar el instalador." in salida
+    assert "uv pip" not in salida
 
 
 def test_carpeta_de_descargas_de_fabrica_explica_donde_queda():
@@ -497,13 +588,12 @@ def test_carpeta_de_descargas_de_fabrica_explica_donde_queda():
 
 def test_transcribir_respeta_la_configuracion(guion, instalado, comandos, tmp_path):
     ajustes.guardar(idioma="en", carpeta_salida=str(tmp_path / "textos"), carpeta_descargas=str(tmp_path / "yt"),
-                    modo_hablantes=ajustes.SIEMPRE)
+                    modo_hablantes=ajustes.SIEMPRE, modelo="turbo")
     historial.guardar_preferencias(hablantes=False)
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
         ("¿Cuántas personas hablan?", "2"),  # no pregunta si identificar: siempre
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
@@ -512,7 +602,8 @@ def test_transcribir_respeta_la_configuracion(guion, instalado, comandos, tmp_pa
 
     comandos.transcribir.assert_called_once_with(
         entrada="https://youtu.be/abc", modelo="turbo", hablantes=True, num=2, minimo=None, idioma="en",
-        salida=tmp_path / "textos", carpeta_descargas=tmp_path / "yt")
+        salida=tmp_path / "textos", carpeta_descargas=tmp_path / "yt", desde_menu=True,
+        titulo="Reunión de prueba", fecha=ANY)
     # La respuesta anterior a "¿Identifico quién habla?" se conserva para cuando vuelva a preguntar
     assert historial.preferencias()["hablantes"] is False
     assert ajustes.valor("modelo") == "turbo"
@@ -527,18 +618,15 @@ def test_corta():
 
 def test_transcribir_volver_atras_repite_la_pregunta_anterior_con_lo_respondido(guion, instalado, comandos, audio):
     guion(
-        ("¿De dónde viene?", "archivo"),
-        ("Arrastra el archivo", str(audio)),
-        ("¿Qué modelo uso?", menu.Atras),        # me equivoqué de archivo
-        ("Arrastra el archivo", menu.Atras),     # en realidad era un enlace
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "small"),
-        ("¿Identifico quién habla?", True),
-        ("¿Cuántas personas hablan?", "2"),
+        ("Arrastra el archivo o pega el enlace", str(audio)),
+        ("¿Identifico quién habla?", "2"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", menu.Atras),               # quiero revisar antes de empezar
-        ("¿Cuántas personas hablan?", menu.Atras),
-        ("¿Identifico quién habla?", False),
+        ("¿Cómo se llama esta reunión?", menu.Atras),
+        ("¿Identifico quién habla?", menu.Atras),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),  # en realidad era un enlace
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
@@ -547,16 +635,14 @@ def test_transcribir_volver_atras_repite_la_pregunta_anterior_con_lo_respondido(
 
     # Al volver, cada pregunta ofrece lo que ya se había respondido
     defectos = [(m, d) for m, _, d in guion.hechas]
-    assert ("Arrastra el archivo aquí o escribe su ruta (Tab completa):", str(audio)) in defectos
-    assert [d for m, d in defectos if "¿De dónde viene?" in m] == [None, "archivo"]
-    assert [d for m, d in defectos if "¿Cuántas personas" in m][-1] == "2"
-    assert [d for m, d in defectos if "¿Identifico" in m][-1] is True
+    assert [d for m, d in defectos if "Arrastra el archivo" in m] == ["", str(audio)]
+    assert [d for m, d in defectos if "¿Identifico" in m] == ["No lo sé", "2", "2"]
     _, opciones = comandos.transcribir.call_args
-    assert (opciones["entrada"], opciones["modelo"], opciones["hablantes"]) == ("https://youtu.be/abc", "small", False)
+    assert (opciones["entrada"], opciones["hablantes"]) == ("https://youtu.be/abc", False)
 
 
 def test_volver_en_la_primera_pregunta_sale_del_flujo(guion, instalado, comandos):
-    guion(("¿De dónde viene?", menu.Atras))
+    guion(("Arrastra el archivo o pega el enlace", menu.Atras))
 
     with pytest.raises(menu.Atras):
         menu.flujo_transcribir()
@@ -564,16 +650,14 @@ def test_volver_en_la_primera_pregunta_sale_del_flujo(guion, instalado, comandos
 
 
 def test_volver_se_salta_las_preguntas_que_no_se_hicieron(guion, instalado, comandos):
-    ajustes.guardar(modo_hablantes=ajustes.SIEMPRE)
+    ajustes.guardar(modo_hablantes=ajustes.NUNCA)
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Cuántas personas hablan?", "3"),
-        ("¿Empiezo?", menu.Atras),
-        ("¿Cuántas personas hablan?", menu.Atras),   # no hubo "¿Identifico quién habla?": vuelve al modelo
-        ("¿Qué modelo uso?", "large"),
-        ("¿Cuántas personas hablan?", "3"),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
+        ("¿Empiezo?", menu.Atras),   # vuelve al nombre
+        ("¿Cómo se llama esta reunión?", menu.Atras),   # no hubo pregunta de hablantes: vuelve al archivo
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/otro"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "cancelar"),
     )
 
@@ -583,11 +667,12 @@ def test_volver_se_salta_las_preguntas_que_no_se_hicieron(guion, instalado, coma
 
 def test_mas_opciones_volver_regresa_a_empiezo(guion, instalado, comandos):
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Identifico quién habla?", False),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "mas"),
+        ("¿Qué quieres cambiar?", "modelo"),
+        ("¿Qué modelo uso?", menu.Atras),           # no cambia nada
         ("¿Qué quieres cambiar?", "idioma"),
         ("¿En qué idioma", menu.Atras),             # no cambia nada
         ("¿Qué quieres cambiar?", "carpeta"),
@@ -600,13 +685,13 @@ def test_mas_opciones_volver_regresa_a_empiezo(guion, instalado, comandos):
     menu.flujo_transcribir()
 
     _, opciones = comandos.transcribir.call_args
-    assert (opciones["idioma"], opciones["salida"]) == ("es", None)
+    assert (opciones["idioma"], opciones["salida"], opciones["modelo"]) == ("es", None, ajustes.valor("modelo"))
 
 
 def test_buscar_otro_archivo_y_volver_regresa_a_la_lista(guion, instalado, con_historial):
     guion(
         ("¿A cuál le cambio los nombres?", "buscar"),
-        ("Arrastra el .blocks.json", menu.Atras),
+        ("Arrastra la transcripción", menu.Atras),
         ("¿A cuál le cambio los nombres?", menu.Atras),
     )
 
@@ -690,24 +775,36 @@ def test_volver_y_esc_con_questionary_de_verdad():
     assert _responder("hola\r", lambda: menu.texto("¿Nombre?")) == "hola"
 
 
+def test_elegir_con_texto_de_volver_propio():
+    """«Dejar como está» hace de «← Volver» (y de Esc) en las preguntas de nombres de hablantes."""
+    opciones = [("Ponerle nombre", 1)]
+    with pytest.raises(menu.Atras):
+        _responder("\x1b[B\r", lambda: menu.elegir("¿Quién?", opciones, texto_volver="Dejar como está"))
+    assert _responder("\r", lambda: menu.elegir("¿Quién?", opciones, texto_volver="Dejar como está")) == 1
+
+
 def test_en_mac_intel_no_ofrece_instalar_hablantes(guion, instalado, comandos, capsys, monkeypatch):
     from src import plataforma
 
     instalado.update({"pyannote.audio": False})
     monkeypatch.setattr(plataforma, "hablantes_disponible", lambda: False)
     guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
+        ("Arrastra el archivo o pega el enlace", "https://youtu.be/abc"),
+        ("¿Cómo se llama esta reunión?", "Reunión de prueba"),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
 
     menu.flujo_transcribir()
 
+    # Al transcribir no se avisa; el motivo se da en Configuración
+    assert "uv pip install" not in capsys.readouterr().out
+    guion(("¿Qué quieres cambiar?", "modo_hablantes"), ("¿Identifico quién habla", ajustes.SIEMPRE),
+          ("¿Algo más?", menu.Atras))
+    menu.flujo_configuracion()
     salida = " ".join(capsys.readouterr().out.split())
-    assert "no está disponible en Macs con procesador Intel" in salida
-    assert "uv pip install" not in salida
+    assert "no está disponible en este computador" in salida
+    assert "uv pip install" not in salida and "instalador" not in salida
 
 
 def test_abrir_en_windows(monkeypatch, tmp_path):
@@ -731,3 +828,154 @@ def test_limpiar_ruta_en_windows_respeta_las_barras(monkeypatch):
     assert str(menu.limpiar_ruta(r'"C:\Users\max\Mi audio.m4a"')) == str(Path(r"C:\Users\max\Mi audio.m4a"))
 
 
+
+
+# --- Nombre de la reunión (fecha de grabación) -------------------------------------
+
+def test_fecha_de_grabacion_usa_la_mas_antigua_entre_creacion_y_modificacion(tmp_path, monkeypatch):
+    from datetime import date
+
+    archivo = tmp_path / "a.m4a"
+    archivo.write_bytes(b"x")
+    antigua = datetime(2026, 10, 30, 9, 0).timestamp()
+    reciente = datetime(2026, 11, 1, 9, 0).timestamp()
+
+    class Info:  # como el stat de un Mac: se copió el archivo (creación nueva), la modificación se conserva
+        st_birthtime, st_mtime, st_ctime = reciente, antigua, reciente
+
+    monkeypatch.setattr(Path, "stat", lambda self: Info())
+    assert menu.fecha_de_grabacion(str(archivo)) == date(2026, 10, 30)
+
+    Info.st_birthtime, Info.st_mtime = antigua, reciente  # creación más antigua que la modificación
+    assert menu.fecha_de_grabacion(str(archivo)) == date(2026, 10, 30)
+
+
+def test_fecha_de_grabacion_sin_birthtime_usa_la_modificacion(tmp_path):
+    from datetime import date
+
+    archivo = tmp_path / "a.m4a"
+    archivo.write_bytes(b"x")
+    os.utime(archivo, (0, datetime(2026, 5, 4, 12, 0).timestamp()))
+
+    assert menu.fecha_de_grabacion(str(archivo)) == date(2026, 5, 4)
+
+
+def test_fecha_de_grabacion_de_un_enlace_o_archivo_ausente_es_hoy(tmp_path):
+    from datetime import date
+
+    assert menu.fecha_de_grabacion("https://youtu.be/abc") == date.today()
+    assert menu.fecha_de_grabacion(str(tmp_path / "no existe.mp3")) == date.today()
+
+
+def test_separar_fecha_y_titulo():
+    from datetime import date
+
+    propuesta = date(2026, 10, 30)
+    assert menu.separar_fecha_y_titulo("Reunión de equipo", propuesta) == (propuesta, "Reunión de equipo")
+    assert menu.separar_fecha_y_titulo("2026-09-01 Cierre", propuesta) == (date(2026, 9, 1), "Cierre")
+    assert menu.separar_fecha_y_titulo("2026-09-01", propuesta) == (date(2026, 9, 1), "Reunión")
+    assert menu.separar_fecha_y_titulo("  ", propuesta) == (propuesta, "Reunión")
+    # Una fecha imposible no es fecha: queda como parte del título
+    assert menu.separar_fecha_y_titulo("2026-13-45 Algo", propuesta) == (propuesta, "2026-13-45 Algo")
+
+
+def test_el_paso_del_nombre_propone_la_fecha_de_grabacion(guion, instalado, comandos, audio):
+    os.utime(audio, (0, datetime(2026, 10, 30, 12, 0).timestamp()))
+    guion(
+        ("Arrastra el archivo o pega el enlace", str(audio)),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "2026-10-30 Reunión"),   # Enter: acepta el valor por defecto
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+
+    menu.flujo_transcribir()
+
+    assert guion.defecto_de("¿Cómo se llama esta reunión?") == "2026-10-30 Reunión"
+    opciones = comandos.transcribir.call_args.kwargs
+    assert (opciones["titulo"], opciones["fecha"].isoformat()) == ("Reunión", "2026-10-30")
+
+
+def test_el_paso_del_nombre_respeta_la_fecha_que_escribe_el_usuario(guion, instalado, comandos, audio, capsys):
+    guion(
+        ("Arrastra el archivo o pega el enlace", str(audio)),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "2025-01-15 Planificación"),
+        ("¿Empiezo?", "empezar"),
+        ("¿Y ahora?", "menu"),
+    )
+
+    menu.flujo_transcribir()
+
+    opciones = comandos.transcribir.call_args.kwargs
+    assert (opciones["titulo"], opciones["fecha"].isoformat()) == ("Planificación", "2025-01-15")
+    assert "2025-01-15 Planificación" in " ".join(capsys.readouterr().out.split())  # el resumen muestra el nombre
+
+
+def test_el_nombre_escrito_se_ofrece_de_nuevo_al_volver(guion, instalado, comandos, audio):
+    guion(
+        ("Arrastra el archivo o pega el enlace", str(audio)),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Mi reunión"),
+        ("¿Empiezo?", menu.Atras),
+        ("¿Cómo se llama esta reunión?", menu.Atras),
+        ("¿Identifico quién habla?", menu.NO_IDENTIFICAR),
+        ("¿Cómo se llama esta reunión?", "Mi reunión"),
+        ("¿Empiezo?", "cancelar"),
+    )
+
+    menu.flujo_transcribir()
+
+    defectos = [d for m, _, d in guion.hechas if "¿Cómo se llama" in m]
+    assert defectos[1] == "Mi reunión" and defectos[2] == "Mi reunión"
+
+
+# --- Copiar al portapapeles --------------------------------------------------------
+
+def test_copiar_transcripcion_copia_el_txt_tal_cual(tmp_path, monkeypatch, capsys):
+    txt = tmp_path / "x.blocks.txt"
+    contenido = "# Reunión\nFecha: 30 de octubre de 2026\n\n[00:00:00] Ana: ¿Qué tal? Ñandú, canción"
+    txt.write_text(contenido, encoding="utf-8")
+    copiar = MagicMock(return_value=True)
+    monkeypatch.setattr(menu.aviso, "copiar_al_portapapeles", copiar)
+
+    assert menu.copiar_transcripcion(txt) is True
+
+    copiar.assert_called_once_with(contenido)
+    assert "Copiada. Puedes pegarla en Claude para hacer la minuta." in capsys.readouterr().out
+
+
+def test_copiar_transcripcion_avisa_si_no_se_pudo(tmp_path, monkeypatch, capsys):
+    txt = tmp_path / "x.blocks.txt"
+    txt.write_text("hola", encoding="utf-8")
+    monkeypatch.setattr(menu.aviso, "copiar_al_portapapeles", MagicMock(return_value=False))
+
+    assert menu.copiar_transcripcion(txt) is False
+
+    salida = capsys.readouterr()
+    assert "Copiada" not in salida.out
+    assert "abrirla y copiarla a mano" in (salida.err + salida.out).replace("\n", " ")
+
+
+def test_copiar_transcripcion_de_un_archivo_que_no_existe_avisa(tmp_path, monkeypatch):
+    copiar = MagicMock(return_value=True)
+    monkeypatch.setattr(menu.aviso, "copiar_al_portapapeles", copiar)
+
+    assert menu.copiar_transcripcion(tmp_path / "no existe.txt") is False
+    copiar.assert_not_called()
+
+
+def test_acciones_ofrece_copiar_despues_de_abrir(guion, instalado, con_historial, monkeypatch):
+    copiar = MagicMock(return_value=True)
+    monkeypatch.setattr(menu.aviso, "copiar_al_portapapeles", copiar)
+    guion(
+        ("¿Cuál?", 0),
+        ("¿Qué hago con entrevista?", "copiar"),
+        ("¿Algo más", "salir"),
+    )
+
+    assert menu.flujo_mis_transcripciones() is False
+
+    etiquetas_ = [o[0] for o in guion.opciones_de("¿Qué hago con")]
+    assert etiquetas_[:2] == ["Abrir la transcripción", "Copiar la transcripción"]
+    copiar.assert_called_once()

@@ -24,6 +24,8 @@ def _de_fabrica() -> dict:
         "modo_hablantes": PREGUNTAR,
         # Sin internet: los modelos se cargan solo de lo ya descargado (ver aplicar_sin_internet)
         "sin_internet": False,
+        # Proponer el nombre de quien ya nombraste antes (por su voz) y guardar las voces nombradas
+        "reconocer_voces": True,
     }
 
 

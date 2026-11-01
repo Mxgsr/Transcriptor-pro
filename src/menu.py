@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -18,8 +18,9 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.text import Text
 
-from src import ajustes, cli, historial, plataforma
+from src import ajustes, aviso, cli, historial, plataforma, voces
 from src.diarizer import parsear_nombres
+from utils.formatters import a_fecha
 from utils.validators import es_url
 
 consola = cli.consola
@@ -52,15 +53,28 @@ IDIOMAS = [
 
 NO_LO_SE = "No lo sé"
 CUANTOS = [NO_LO_SE, "2", "3", "4", "5 o más"]
+NO_IDENTIFICAR = "no"  # respuesta a "¿Identifico quién habla?" que no es un número de personas
+
+# Pregunta única de hablantes cuando Configuración dice "preguntar cada vez"
+OPCIONES_HABLANTES = [
+    ("No identificar", NO_IDENTIFICAR),
+    ("Sí, no sé cuántos", NO_LO_SE),
+    ("Sí, 2 personas", "2"),
+    ("Sí, 3 personas", "3"),
+    ("Sí, 4 personas", "4"),
+    ("Sí, 5 o más", "5 o más"),
+]
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
 # Cuántas transcripciones se ofrecen en las listas (las más recientes)
 MAX_EN_LISTA = 15
 
-INSTALAR_DIARIZACION = 'uv pip install -e ".[diarizacion]"'
+# Quien usa el menú no maneja comandos: si falta el componente, se le dice qué hacer en simple
+FALTA_DIARIZACION = "Para identificar hablantes falta un componente. Vuelve a ejecutar el instalador."
 
-NOMBRE_MOSTRAR_EN_CARPETA = {"darwin": "Mostrar en Finder", "win32": "Mostrar en el Explorador"}
+# Textos generales, sin nombrar el sistema (Finder, Explorador...): los usuarios tienen computadores distintos
+MOSTRAR_EN_CARPETA = "Mostrar en su carpeta"
 
 
 # --- Preguntas --------------------------------------------------------------
@@ -93,10 +107,11 @@ def _preguntar(pregunta, volver: bool):
     return respuesta
 
 
-def elegir(mensaje: str, opciones: list, defecto=None, volver: bool = True):
+def elegir(mensaje: str, opciones: list, defecto=None, volver: bool = True, texto_volver: str = VOLVER):
     """
     Lista para elegir con flechas. Cada opción es un texto o una tupla (texto, valor).
-    Con volver, termina con "← Volver" (y Esc hace lo mismo).
+    Con volver, termina con "← Volver" (y Esc hace lo mismo). texto_volver cambia ese texto
+    (p. ej. "Dejar como está") cuando "volver" significa otra cosa en esa pregunta.
     """
     choices = [questionary.Choice(o[0], o[1]) if isinstance(o, tuple) else questionary.Choice(o, o)
                for o in opciones]
@@ -104,7 +119,7 @@ def elegir(mensaje: str, opciones: list, defecto=None, volver: bool = True):
     if defecto is not None and defecto not in [c.value for c in choices]:
         defecto = None
     if volver:
-        choices.append(questionary.Choice(VOLVER, _ATRAS))
+        choices.append(questionary.Choice(texto_volver, _ATRAS))
     return _preguntar(questionary.select(mensaje, choices, default=defecto, qmark="?", pointer="❯",
                                          instruction=" ", style=ESTILO), volver)
 
@@ -200,75 +215,77 @@ def flujo_transcribir():
     prefs = historial.preferencias()
     instalado_hablantes = _instalado("pyannote.audio")
     modo_hablantes = ajustes.valor("modo_hablantes")
-    if not instalado_hablantes and modo_hablantes != ajustes.NUNCA:
-        consola.print(f"[dim]{escape(_falta_diarizacion('Para identificar hablantes, instala: '))}[/]")
 
     # Las respuestas: al volver atrás, cada pregunta ofrece lo que ya se había respondido.
     # Idioma y carpeta salen de Configuración; "Más opciones…" los cambia solo para esta vez.
-    r = {"origen": prefs.get("origen"), "archivo": "", "enlace": "", "modelo": ajustes.valor("modelo"),
-         "hablantes": False, "cuantos": None,
+    r = {"entrada": "", "modelo": ajustes.valor("modelo"), "hablantes": False, "cuantos": None,
          "idioma": ajustes.valor("idioma"), "salida": ajustes.carpeta("carpeta_salida")}
 
-    def origen():
-        r["origen"] = elegir("¿De dónde viene?", [
-            ("Un archivo de mi Mac", "archivo"),
-            ("Un enlace (YouTube u otro)", "enlace"),
-        ], r["origen"])
-
     def entrada():
-        if r["origen"] == "archivo":
-            r["archivo"] = ruta("Arrastra el archivo aquí o escribe su ruta (Tab completa):",
-                                validar=_validar_archivo, defecto=r["archivo"])
-        else:
-            r["enlace"] = texto("Pega el enlace:", validar=_validar_enlace, defecto=r["enlace"]).strip()
+        r["entrada"] = ruta("Arrastra el archivo o pega el enlace:", validar=_validar_archivo_o_enlace,
+                            defecto=r["entrada"]).strip()
 
-    def modelo():
-        r["modelo"] = elegir("¿Qué modelo uso?", _opciones_con_descripcion(MODELOS_WHISPER, ajustes.valor("modelo")),
-                             r["modelo"])
-
-    # Con "siempre" o "nunca" en Configuración, estas preguntas no se hacen
+    # Una sola pregunta. Con "siempre" no se ofrece "No identificar"; con "nunca" (o sin pyannote) no se pregunta
     def hablantes():
-        if not instalado_hablantes or modo_hablantes != ajustes.PREGUNTAR:
-            r["hablantes"] = instalado_hablantes and modo_hablantes == ajustes.SIEMPRE
+        if not instalado_hablantes or modo_hablantes == ajustes.NUNCA:
+            r["hablantes"], r["cuantos"] = False, None
             return False
-        r["hablantes"] = si_no("¿Identifico quién habla?", r.get("hablantes_dicho", prefs.get("hablantes", True)))
-        r["hablantes_dicho"] = r["hablantes"]
+        if modo_hablantes == ajustes.SIEMPRE:
+            respuesta = elegir("¿Cuántas personas hablan?", CUANTOS, r["cuantos"] or prefs.get("cuantos", NO_LO_SE))
+        else:
+            if "respuesta_hablantes" in r:
+                defecto = r["respuesta_hablantes"]
+            elif prefs.get("hablantes", True):
+                defecto = prefs.get("cuantos") or NO_LO_SE
+            else:
+                defecto = NO_IDENTIFICAR
+            respuesta = elegir("¿Identifico quién habla?", OPCIONES_HABLANTES, defecto)
+            r["respuesta_hablantes"] = respuesta
+            r["hablantes_dicho"] = respuesta != NO_IDENTIFICAR
+        r["hablantes"] = respuesta != NO_IDENTIFICAR
+        r["cuantos"] = respuesta if r["hablantes"] else None
 
-    def cuantos():
-        if not r["hablantes"]:
-            r["cuantos"] = None
-            return False
-        r["cuantos"] = elegir("¿Cuántas personas hablan?", CUANTOS, r["cuantos"] or prefs.get("cuantos", NO_LO_SE))
+    # Cómo se llama la reunión: por defecto "<fecha de grabación> Reunión". Si se cambia el archivo,
+    # la propuesta se recalcula (la fecha es la de ese audio).
+    def nombre():
+        propuesta = f"{fecha_de_grabacion(_entrada(r)).isoformat()} Reunión"
+        if r.get("nombre_para") != r["entrada"]:
+            r["nombre"] = propuesta
+        r["nombre"] = texto("¿Cómo se llama esta reunión?", defecto=r["nombre"]).strip()
+        r["nombre_para"] = r["entrada"]
+        r["fecha"], r["titulo"] = separar_fecha_y_titulo(r["nombre"], fecha_de_grabacion(_entrada(r)))
 
     def empezar():
         while True:
             consola.print(_resumen_transcribir(_entrada(r), r["modelo"], r["hablantes"], r["cuantos"],
-                                               r["idioma"], r["salida"]))
+                                               r["idioma"], r["salida"], f"{r['fecha'].isoformat()} {r['titulo']}"))
             decision = elegir("¿Empiezo?", [
                 ("Sí, empezar", "empezar"),
-                ("Más opciones… (idioma, carpeta donde guardar)", "mas"),
+                ("Más opciones… (modelo, idioma, carpeta)", "mas"),
                 ("Cancelar", "cancelar"),
             ])
             if decision != "mas":
                 r["decision"] = decision
                 return
-            r["idioma"], r["salida"] = _mas_opciones(r["idioma"], r["salida"])
+            r["modelo"], r["idioma"], r["salida"] = _mas_opciones(r["modelo"], r["idioma"], r["salida"])
 
-    seguir_pasos([origen, entrada, modelo, hablantes, cuantos, empezar])
+    seguir_pasos([entrada, hablantes, nombre, empezar])
     if r["decision"] == "cancelar":
         return True
 
-    # Lo que se respondió queda como respuesta por defecto la próxima vez (el modelo, también en
-    # Configuración). Si la pregunta no se hizo, se conserva la respuesta anterior.
-    recordar = {"origen": r["origen"], "modelo": r["modelo"], "cuantos": r["cuantos"] or prefs.get("cuantos")}
+    # Lo que se respondió queda como respuesta por defecto la próxima vez. Si la pregunta no se hizo,
+    # se conserva la anterior. El modelo de "Más opciones…" es solo para esta vez, como idioma y carpeta:
+    # el de por defecto se cambia en Configuración (y es el que usan los scripts y el Grabador).
+    recordar = {"cuantos": r["cuantos"] or prefs.get("cuantos")}
     if "hablantes_dicho" in r:
-        recordar["hablantes"] = r["hablantes"]
+        recordar["hablantes"] = r["hablantes_dicho"]
     historial.guardar_preferencias(**recordar)
 
     num, minimo = numero_de_hablantes(r["cuantos"])
     resultado = _ejecutar(cli.ejecutar_transcripcion, entrada=_entrada(r), modelo=r["modelo"],
                           hablantes=r["hablantes"], num=num, minimo=minimo, idioma=r["idioma"], salida=r["salida"],
-                          carpeta_descargas=ajustes.carpeta("carpeta_descargas"))
+                          carpeta_descargas=ajustes.carpeta("carpeta_descargas"), desde_menu=True,
+                          titulo=r["titulo"], fecha=r["fecha"])
     if resultado is None:
         return True
 
@@ -276,8 +293,8 @@ def flujo_transcribir():
 
 
 def _entrada(r: dict) -> str:
-    """Lo que se va a transcribir: la ruta del archivo (limpia) o el enlace."""
-    return str(limpiar_ruta(r["archivo"])) if r["origen"] == "archivo" else r["enlace"]
+    """Lo que se va a transcribir: el enlace, o la ruta del archivo (limpia)."""
+    return r["entrada"] if es_url(r["entrada"]) else str(limpiar_ruta(r["entrada"]))
 
 
 def numero_de_hablantes(cuantos: Optional[str]) -> tuple:
@@ -288,7 +305,40 @@ def numero_de_hablantes(cuantos: Optional[str]) -> tuple:
     return (None, numero) if "más" in cuantos else (numero, None)
 
 
-def _resumen_transcribir(entrada, modelo, hablantes, cuantos, idioma, salida) -> Text:
+def fecha_de_grabacion(entrada: str) -> date:
+    """
+    Cuándo se grabó el audio. Para un enlace, hoy. Para un archivo, la fecha más antigua entre su
+    creación (st_birthtime en Mac; st_ctime es la creación en Windows) y su modificación: copiar un
+    archivo cambia la creación pero no la modificación. Si no se puede leer, hoy.
+    """
+    if es_url(entrada):
+        return date.today()
+    try:
+        info = Path(entrada).stat()
+    except OSError:
+        return date.today()
+    # En Linux st_ctime es el último cambio de datos, no la creación; la modificación ya lo cubre
+    creacion = getattr(info, "st_birthtime", None)
+    if creacion is None and sys.platform == "win32":
+        creacion = info.st_ctime
+    momentos = [m for m in (creacion, info.st_mtime) if m]
+    return datetime.fromtimestamp(min(momentos)).date() if momentos else date.today()
+
+
+def separar_fecha_y_titulo(escrito: str, fecha_propuesta: date) -> tuple:
+    """
+    Si lo escrito empieza con una fecha AAAA-MM-DD, esa es la fecha y el resto el título; si no,
+    se usa la fecha propuesta y todo lo escrito es el título. Título vacío: "Reunión".
+    """
+    escrito = escrito.strip()
+    coincide = re.match(r"(\d{4}-\d{2}-\d{2})(?!\d)[\s\-–:]*(.*)$", escrito, re.DOTALL)
+    fecha = a_fecha(coincide.group(1)) if coincide else None
+    if fecha:
+        escrito = coincide.group(2).strip()
+    return fecha or fecha_propuesta, escrito or "Reunión"
+
+
+def _resumen_transcribir(entrada, modelo, hablantes, cuantos, idioma, salida, reunion=None) -> Text:
     nombre = entrada if es_url(entrada) else Path(entrada).name
     resumen = Text("\nVoy a transcribir ")
     resumen.append(nombre, style="bold")
@@ -302,24 +352,32 @@ def _resumen_transcribir(entrada, modelo, hablantes, cuantos, idioma, salida) ->
         else:
             resumen.append(", identificando quién habla")
     resumen.append(".")
+    if reunion:
+        resumen.append(" La reunión se llamará ")
+        resumen.append(reunion, style="bold")
+        resumen.append(".")
     if salida:
         resumen.append(f" Lo guardo en {corta(salida)}.")
     return resumen
 
 
-def _mas_opciones(idioma: str, salida: Optional[Path]) -> tuple:
-    """Idioma y carpeta de salida para esta transcripción. "← Volver" regresa a ¿Empiezo?."""
+def _mas_opciones(modelo: str, idioma: str, salida: Optional[Path]) -> tuple:
+    """Modelo, idioma y carpeta de salida para esta transcripción. "← Volver" regresa a ¿Empiezo?."""
     while True:
         opciones = [
+            (f"Modelo: {modelo}", "modelo"),
             (f"Idioma: {_nombre_idioma(idioma)}", "idioma"),
             (f"Carpeta donde guardar: {corta(salida) if salida else 'junto al audio'}", "carpeta"),
         ]
         try:
             opcion = elegir("¿Qué quieres cambiar?", opciones)
         except (Atras, KeyboardInterrupt, EOFError):
-            return idioma, salida
+            return modelo, idioma, salida
         try:
-            if opcion == "idioma":
+            if opcion == "modelo":
+                modelo = elegir("¿Qué modelo uso?", _opciones_con_descripcion(MODELOS_WHISPER, ajustes.valor("modelo")),
+                                modelo)
+            elif opcion == "idioma":
                 idioma = preguntar_idioma("¿En qué idioma está el audio?", idioma)
             else:
                 elegida = ruta("Carpeta donde guardar (vacío: junto al audio):", validar=_validar_carpeta,
@@ -378,7 +436,6 @@ def nombrar_archivo(json_path: Path) -> Optional[Path]:
         r["como"] = elegir("¿Cómo?", [
             ("Escuchar a cada uno y ponerle nombre", "escuchar"),
             ("Escribir los nombres en orden (Ana, Luis…)", "lista"),
-            ("Usar los nombres que edité a mano en el .json", "json"),
         ], r["como"])
 
     def lista():
@@ -407,15 +464,16 @@ def elegir_transcripcion(mensaje: str, solo_con_hablantes: bool = False) -> Path
                 return entradas[eleccion]["json"] or entradas[eleccion]["txt"]
         try:
             if solo_con_hablantes:
-                pedido = ruta("Arrastra el .blocks.json aquí o escribe su ruta:", validar=_validar_json)
+                pedido = ruta("Arrastra la transcripción aquí o escribe su ruta:", validar=_validar_con_hablantes)
             else:
-                pedido = ruta("Arrastra el .blocks.json o el .blocks.txt aquí, o escribe su ruta:",
-                              validar=_validar_transcripcion)
+                pedido = ruta("Arrastra la transcripción aquí o escribe su ruta:", validar=_validar_transcripcion)
         except Atras:
             if entradas:
                 continue  # de vuelta a la lista
             raise
         archivo = limpiar_ruta(pedido)
+        if solo_con_hablantes and archivo.suffix == ".txt":
+            archivo = _txt_y_json(archivo)[1]  # validado: el .json existe al lado
         # Así aparece en la lista la próxima vez
         txt, json_path = _txt_y_json(archivo)
         if txt.exists():
@@ -424,6 +482,8 @@ def elegir_transcripcion(mensaje: str, solo_con_hablantes: bool = False) -> Path
 
 
 # --- Configuración ------------------------------------------------------------
+
+_OLVIDAR_TODAS = "olvidar_todas"
 
 MODOS = [
     ("Preguntar cada vez", ajustes.PREGUNTAR),
@@ -464,11 +524,42 @@ def _elegir_ajuste(mensaje: str, salida: Optional[Path]) -> str:
         (f"Carpeta de descargas: {_texto_descargas()}", "carpeta_descargas"),
         (f"Carpeta de las transcripciones: {corta(salida) if salida else 'junto al audio'}", "carpeta_salida"),
         (f"Sin internet: {'sí' if ajustes.valor('sin_internet') else 'no'}", "sin_internet"),
+        (f"Reconocer voces: {'sí' if ajustes.valor('reconocer_voces') else 'no'}", "reconocer_voces"),
+        *_entrada_voces_guardadas(),
     ])
+
+
+def _entrada_voces_guardadas() -> list:
+    """«Voces guardadas: N» solo si hay alguna (si no, no hay nada que olvidar)."""
+    try:
+        cuantas = len(voces.conocidas())
+    except Exception:
+        return []
+    return [(f"Voces guardadas: {cuantas}", "voces_guardadas")] if cuantas else []
+
+
+def _gestionar_voces_guardadas():
+    """Olvidar a una persona o a todas. Esc vuelve a Configuración. Siempre retorna None (no es un ajuste)."""
+    while True:
+        nombres = voces.conocidas()
+        if not nombres:
+            return None
+        eleccion = elegir("Voces guardadas (solo están en este computador). ¿Cuál olvido?",
+                          [*nombres, ("Olvidar todas", _OLVIDAR_TODAS)])
+        if eleccion == _OLVIDAR_TODAS:
+            if si_no("¿Seguro que olvido todas las voces? Tendrás que volver a ponerles nombre.", defecto=False):
+                voces.olvidar_todas()
+                consola.print("[green]✓[/] Olvidé todas las voces.")
+            continue
+        if si_no(f"¿Olvido la voz de {eleccion}?", defecto=False):
+            voces.olvidar(eleccion)
+            consola.print(f"[green]✓[/] Olvidé la voz de {eleccion}.")
 
 
 def _cambiar_ajuste(clave: str):
     """Pregunta el nuevo valor de un ajuste. Retorna None si no cambia."""
+    if clave == "voces_guardadas":  # no es un ajuste con valor: es la lista de voces para olvidar
+        return _gestionar_voces_guardadas()
     actual = ajustes.valor(clave)
     if clave == "idioma":
         return preguntar_idioma("Idioma por defecto del audio:", actual)
@@ -480,6 +571,11 @@ def _cambiar_ajuste(clave: str):
         return elegir("¿Uso solo los modelos ya descargados?", [
             ("No: revisa si hay versiones nuevas y descarga los modelos que falten", False),
             ("Sí: no se conecta a Hugging Face (YouTube igual necesita internet)", True),
+        ], bool(actual))
+    if clave == "reconocer_voces":
+        return elegir("¿Reconozco por la voz a quien ya nombraste antes?", [
+            ("Sí: propone el nombre de quien ya nombraste antes (las voces se guardan solo en este computador)", True),
+            ("No: deja de proponer y de guardar voces (las ya guardadas no se borran)", False),
         ], bool(actual))
     if clave == "carpeta_descargas":
         elegida = ruta("Carpeta para el audio que se descarga de YouTube (se crea si no existe):",
@@ -505,7 +601,7 @@ def _cambiar_ajuste(clave: str):
 
 def _avisar_si_falta(clave: str, valor):
     if clave == "modo_hablantes" and valor != ajustes.NUNCA and not _instalado("pyannote.audio"):
-        consola.print(f"[yellow]{escape(_falta_diarizacion('Para identificar hablantes falta instalar: '))}[/]")
+        consola.print(f"[yellow]{escape(_falta_diarizacion())}[/]")
 
 
 def _nombre_modo(modo: str) -> str:
@@ -561,11 +657,11 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
     Con volver, ofrece "← Volver" (lanza Atras, para regresar a la lista de donde se eligió).
     """
     while True:
-        opciones = [("Abrir la transcripción", "abrir")]
+        opciones = [("Abrir la transcripción", "abrir"), ("Copiar la transcripción", "copiar")]
         if json_path:
             opciones.append(("Cambiar nombres de hablantes", "nombres"))
         opciones += [
-            (NOMBRE_MOSTRAR_EN_CARPETA.get(sys.platform, "Mostrar en su carpeta"), "carpeta"),
+            (MOSTRAR_EN_CARPETA, "carpeta"),
             ("Volver al menú", "menu"),
             ("Salir", "salir"),
         ]
@@ -580,6 +676,8 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
         try:
             if opcion == "abrir":
                 abrir(txt)
+            elif opcion == "copiar":
+                copiar_transcripcion(txt)
             elif opcion == "carpeta":
                 abrir(txt, revelar=True)
             elif opcion == "nombres":
@@ -587,6 +685,19 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
         except (Atras, KeyboardInterrupt, EOFError):
             consola.print()
         mensaje = "¿Algo más con esta transcripción?"
+
+
+def copiar_transcripcion(txt: Path) -> bool:
+    """Copia el contenido del .txt (con su encabezado, si lo tiene) al portapapeles."""
+    try:
+        contenido = Path(txt).read_text(encoding="utf-8")
+    except OSError:
+        contenido = None
+    if contenido is not None and aviso.copiar_al_portapapeles(contenido):
+        consola.print("[green]✓[/] Copiada. Puedes pegarla en Claude para hacer la minuta.")
+        return True
+    _avisar("No pude copiar la transcripción. Puedes abrirla y copiarla a mano.")
+    return False
 
 
 def etiquetas(entradas: list) -> list:
@@ -654,24 +765,55 @@ def _ejecutar(comando, **opciones):
     Corre un comando de la CLI. Si falla o se cancela, el comando ya mostró el motivo:
     retornamos None y el menú sigue.
     """
+    cli.ultimo_error = None
     try:
         return comando(**opciones)
-    except typer.Exit:
+    except typer.Exit as salida:
+        # Código 1 = falló y el recuadro ya lo explicó; 130 = canceló, no hay nada que preguntar
+        if salida.exit_code == 1 and cli.ultimo_error:
+            _que_hago_con_el_error(cli.ultimo_error)
         return None
     except typer.BadParameter as e:
         _avisar(e.format_message())
         return None
 
 
+def _que_hago_con_el_error(archivo: Path):
+    """
+    Después de un error: ver el detalle, copiarlo para pedir ayuda, o volver. Se repite hasta volver (o Esc).
+    «Ver el detalle» lo imprime aquí mismo en gris en vez de abrir el archivo: abrir un .txt lanza otro
+    programa (Bloc de notas, TextEdit...) y quien no es técnico se pierde; en pantalla se lee al instante.
+    """
+    while True:
+        try:
+            decision = elegir("¿Qué hago?", [("Ver el detalle", "ver"), ("Copiar el error", "copiar")],
+                              texto_volver="Volver al menú")
+        except Atras:
+            return
+        try:
+            contenido = Path(archivo).read_text(encoding="utf-8")
+        except OSError:
+            _avisar(f"No pude leer el archivo del detalle. Debería estar en {cli.errores.ruta_corta(archivo)}")
+            continue
+        if decision == "ver":
+            consola.print()
+            consola.print(Text(contenido, style="dim"))
+            consola.print()
+        elif aviso.copiar_al_portapapeles(contenido):
+            consola.print("[green]✓ Copiado.[/] Puedes pegarlo en un mensaje para pedir ayuda.")
+        else:
+            _avisar(f"No pude copiarlo. Puedes abrir el archivo a mano: {cli.errores.ruta_corta(archivo)}")
+
+
 def _avisar(mensaje: str):
     cli.consola_err.print(Panel(Text(mensaje), border_style="yellow", expand=False))
 
 
-def _falta_diarizacion(como_instalar: str) -> str:
-    """Cómo instalar la diarización, o por qué no se puede en este computador."""
+def _falta_diarizacion() -> str:
+    """Qué hacer si falta la diarización, o por qué no se puede en este computador."""
     if not plataforma.hablantes_disponible():
         return plataforma.SIN_HABLANTES
-    return como_instalar + INSTALAR_DIARIZACION
+    return FALTA_DIARIZACION
 
 
 def _instalado(modulo: str) -> bool:
@@ -730,22 +872,31 @@ def _validar_archivo(texto: str):
     return True
 
 
+def _validar_archivo_o_enlace(texto: str):
+    """Un solo campo para las dos cosas: si empieza con http es un enlace, si no, un archivo."""
+    if not texto.strip():
+        return "Arrastra el archivo aquí o pega el enlace."
+    if es_url(texto):
+        return True
+    return _validar_archivo(texto)
+
+
 def _validar_transcripcion(texto: str):
     valido = _validar_archivo(texto)
     if valido is True and limpiar_ruta(texto).suffix not in (".json", ".txt"):
-        return "Necesito el .blocks.json o el .blocks.txt de una transcripción."
+        return "Elige una transcripción hecha con Transcriptor (termina en .blocks.txt)."
     return valido
 
 
-def _validar_json(texto: str):
-    valido = _validar_archivo(texto)
-    if valido is True and limpiar_ruta(texto).suffix != ".json":
-        return "Necesito el .blocks.json (solo existe si identificaste a los hablantes)."
-    return valido
-
-
-def _validar_enlace(texto: str):
-    return True if es_url(texto) else "Pega un enlace que empiece con http:// o https://"
+def _validar_con_hablantes(texto: str):
+    """Para cambiar nombres: vale el .json, o el .txt si al lado está el .json."""
+    valido = _validar_transcripcion(texto)
+    if valido is not True:
+        return valido
+    archivo = limpiar_ruta(texto)
+    if archivo.suffix == ".txt" and not _txt_y_json(archivo)[1]:
+        return "Esa transcripción no tiene hablantes identificados: elige una hecha identificando quién habla."
+    return True
 
 
 def _validar_carpeta(texto: str):

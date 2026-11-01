@@ -1,4 +1,6 @@
 # Ubicación: tests/test_formatters.py
+import json
+
 import pytest
 
 from utils.formatters import (
@@ -73,7 +75,8 @@ def test_json_guarda_audio_y_nombres_y_lee_el_formato_antiguo(tmp_path):
     guardar_json(parrafos, nuevo, audio=tmp_path / "a.mp3", nombres={"Hablante 1": "Ana"})
 
     assert cargar_transcripcion(nuevo) == {
-        "audio": str(tmp_path / "a.mp3"), "nombres": {"Hablante 1": "Ana"}, "parrafos": parrafos,
+        "audio": str(tmp_path / "a.mp3"), "nombres": {"Hablante 1": "Ana"}, "parrafos": parrafos, "huellas": {},
+        "titulo": None, "fecha": None, "duracion": None,
     }
     assert cargar_json(nuevo) == parrafos
 
@@ -81,4 +84,65 @@ def test_json_guarda_audio_y_nombres_y_lee_el_formato_antiguo(tmp_path):
     antiguo.write_text('[{"start": 0, "end": 1, "text": "Hola", "speaker": "Ana"}]', encoding="utf-8")
     assert cargar_transcripcion(antiguo) == {
         "audio": None, "nombres": {}, "parrafos": [{"start": 0, "end": 1, "text": "Hola", "speaker": "Ana"}],
+        "huellas": {}, "titulo": None, "fecha": None, "duracion": None,
     }
+
+
+def test_json_guarda_y_lee_las_huellas(tmp_path):
+    from utils.formatters import guardar_json, cargar_transcripcion
+
+    parrafos = [{"start": 0, "end": 1, "text": "Hola", "speaker": "Hablante 1"}]
+    huellas = {"Hablante 1": [0.6, -0.8]}
+    ruta = tmp_path / "a.blocks.json"
+    guardar_json(parrafos, ruta, nombres={}, huellas=huellas)
+
+    assert json.loads(ruta.read_text(encoding="utf-8"))["huellas"] == huellas
+    assert cargar_transcripcion(ruta)["huellas"] == huellas
+
+
+def test_json_sin_huellas_no_escribe_la_clave(tmp_path):
+    from utils.formatters import guardar_json
+
+    ruta = tmp_path / "a.blocks.json"
+    guardar_json([], ruta, huellas={})
+    assert "huellas" not in json.loads(ruta.read_text(encoding="utf-8"))
+
+
+def test_json_con_huellas_estropeadas_se_lee_sin_ellas(tmp_path):
+    from utils.formatters import cargar_transcripcion
+
+    ruta = tmp_path / "a.blocks.json"
+    ruta.write_text('{"audio": null, "nombres": {}, "parrafos": [], "huellas": [1, 2]}', encoding="utf-8")
+    assert cargar_transcripcion(ruta)["huellas"] == {}
+
+
+def test_fecha_en_espanol_no_depende_del_sistema():
+    from datetime import date
+    from utils.formatters import fecha_en_espanol
+
+    assert fecha_en_espanol(date(2026, 10, 30)) == "30 de octubre de 2026"
+    assert fecha_en_espanol(date(2026, 3, 1)) == "1 de marzo de 2026"
+
+
+def test_formato_duracion():
+    from utils.formatters import formato_duracion
+
+    assert [formato_duracion(s) for s in (3, 108, 3900)] == ["3 s", "1 min 48 s", "1 h 05 min"]
+
+
+def test_nombre_de_archivo_seguro():
+    from utils.formatters import nombre_de_archivo_seguro
+
+    assert nombre_de_archivo_seguro('a\\b/c:d*e?f"g<h>i|j\x07k') == "abcdefghijk"
+    assert nombre_de_archivo_seguro("  Hola   mundo. . ") == "Hola mundo"
+    assert nombre_de_archivo_seguro('???') == "Reunión"
+    assert len(nombre_de_archivo_seguro("x" * 500)) <= 120
+
+
+def test_encabezado_sin_participantes_omite_la_linea():
+    from datetime import date
+    from utils.formatters import encabezado_de_transcripcion
+
+    assert encabezado_de_transcripcion("Mi reunión", date(2026, 10, 30), 3900, [{"text": "Hola"}]) == (
+        "# Mi reunión\nFecha: 30 de octubre de 2026\nDuración: 1 h 05 min\n\n"
+    )

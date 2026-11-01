@@ -5,7 +5,7 @@
 import platform
 import sys
 
-SIN_HABLANTES = "Identificar hablantes no está disponible en Macs con procesador Intel."
+SIN_HABLANTES = "Identificar hablantes no está disponible en este computador."
 
 
 def es_mac_con_chip_apple() -> bool:
