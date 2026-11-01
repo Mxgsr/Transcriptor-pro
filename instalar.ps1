@@ -24,7 +24,7 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     }
 }
 
-# 2. Transcriptor. Los extras que no sirven en Windows (la corrección con IA) se saltan solos.
+# 2. Transcriptor. Los extras que no sirven en Windows se saltan solos.
 #    El proyecto lo baja PowerShell (que ya llegó a GitHub para bajar este instalador) y uv lo
 #    instala desde ese archivo. Más tiempo de espera que el de fábrica (30 s), por si la conexión
 #    es lenta: después vienen paquetes grandes como PyTorch.
@@ -38,7 +38,7 @@ Invoke-WebRequest -UseBasicParsing -Uri $Zip -OutFile $Archivo
 
 Paso "Instalando Transcriptor Pro (la primera vez tarda unos minutos)"
 if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }
-$Paquete = "transcriptor-pro[diarizacion,correccion] @ " + ([System.Uri]$Archivo).AbsoluteUri
+$Paquete = "transcriptor-pro[diarizacion] @ " + ([System.Uri]$Archivo).AbsoluteUri
 uv tool install --force --upgrade --reinstall-package transcriptor-pro --python 3.11 $Paquete
 $Resultado = $LASTEXITCODE
 Remove-Item -Recurse -Force $Temporal -ErrorAction SilentlyContinue

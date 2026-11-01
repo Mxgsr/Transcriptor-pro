@@ -10,7 +10,7 @@ from typing import Optional
 
 from src import config, historial
 
-# Modos para las preguntas de hablantes y corrección al transcribir desde el menú
+# Modos para las preguntas de hablantes al transcribir desde el menú
 PREGUNTAR, SIEMPRE, NUNCA = "preguntar", "siempre", "nunca"
 MODOS = (PREGUNTAR, SIEMPRE, NUNCA)
 
@@ -19,13 +19,9 @@ def _de_fabrica() -> dict:
     return {
         "idioma": "es",
         "modelo": config.DEFAULT_MODEL,
-        "modelo_corrector": config.CORRECTOR_MODEL,
         "carpeta_descargas": config.DOWNLOAD_DIR,
         "carpeta_salida": None,  # junto al audio
         "modo_hablantes": PREGUNTAR,
-        "modo_correccion": PREGUNTAR,
-        # Nombres y siglas que la corrección debe escribir bien ("COSAM, OSL, señorita Catalina")
-        "vocabulario": "",
         # Sin internet: los modelos se cargan solo de lo ya descargado (ver aplicar_sin_internet)
         "sin_internet": False,
     }

@@ -50,9 +50,8 @@ def historial_temporal(monkeypatch, tmp_path):
 
 @pytest.fixture(autouse=True)
 def como_en_mac_con_chip_apple(monkeypatch):
-    """Por defecto, los tests corren como en el Mac de Max (hablantes y corrección disponibles)."""
+    """Por defecto, los tests corren como en el Mac de Max (hablantes disponibles)."""
     from src import plataforma
 
     monkeypatch.setattr(plataforma, "es_mac_con_chip_apple", lambda: True)
     monkeypatch.setattr(plataforma, "hablantes_disponible", lambda: True)
-    monkeypatch.setattr(plataforma, "correccion_disponible", lambda: True)

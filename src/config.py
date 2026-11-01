@@ -48,6 +48,3 @@ DIARIZATION_MODEL = os.getenv("DIARIZATION_MODEL", "pyannote/speaker-diarization
 # Dónde corre la diarización: auto (GPU del Mac si está disponible), mps, cuda o cpu
 DIARIZATION_DEVICE = os.getenv("DIARIZATION_DEVICE", "auto")
 
-# 7. Corrección con IA local (transcriptor corregir)
-# Nombre corto (qwen3-4b, qwen3-8b, gemma4-e4b) o un repo de mlx-community en Hugging Face
-CORRECTOR_MODEL = os.getenv("CORRECTOR_MODEL", "qwen3-8b")

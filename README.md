@@ -1,6 +1,6 @@
 # 🎙️ Transcriptor Pro
 
-Convierte en texto un audio, un video o un enlace de YouTube. Puede reconocer quién habla en cada momento y corregir la transcripción con una IA que corre en tu computador, sin enviar nada a internet.
+Convierte en texto un audio, un video o un enlace de YouTube. Puede reconocer quién habla en cada momento.
 
 Funciona en Mac y en Windows.
 
@@ -56,7 +56,6 @@ Escribe `transcriptor` y se abre un menú. Te mueves con las flechas ↑ ↓ y e
 
 Desde el menú puedes:
 - Transcribir un archivo o un enlace de YouTube.
-- Corregir una transcripción con IA.
 - Cambiar los nombres de los hablantes.
 - Ver tus últimas transcripciones.
 - Cambiar la configuración (idioma, modelo, carpetas…).
@@ -73,7 +72,6 @@ El audio y el texto nunca salen de tu computador: todo se procesa ahí. Internet
 |---|---|---|---|
 | Transcribir | ✅ | ✅ | ✅ |
 | Reconocer quién habla | ✅ | ✅ | ❌ |
-| Corregir con IA | ✅ | ❌ | ❌ |
 
 En Windows y en Mac con Intel la transcripción es más lenta: los modelos `small` o `turbo` son una buena opción.
 
@@ -84,7 +82,6 @@ Todo lo del menú también se puede hacer con comandos:
 ```
 transcriptor transcribir "ENLACE_O_ARCHIVO"           # transcribir
 transcriptor transcribir "ENLACE_O_ARCHIVO" -d        # y reconocer quién habla
-transcriptor corregir "mi_audio.blocks.json"          # corregir con IA
 transcriptor nombres "mi_audio.blocks.json" -e        # cambiar nombres escuchando a cada hablante
 ```
 
@@ -99,7 +96,7 @@ git clone https://github.com/Mxgsr/Transcriptor-pro.git
 cd Transcriptor-pro
 uv venv
 source .venv/bin/activate
-uv pip install -e ".[diarizacion,correccion]"
+uv pip install -e ".[diarizacion]"
 ```
 
 Para correr los tests (no necesitan red ni modelos):

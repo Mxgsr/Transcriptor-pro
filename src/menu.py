@@ -45,12 +45,6 @@ MODELOS_WHISPER = [
     ("tiny", "el más rápido, el menos preciso"),
 ]
 
-MODELOS_IA = [
-    ("qwen3-8b", "equilibrado (recomendado)"),
-    ("qwen3-4b", "más rápido"),
-    ("gemma4-e4b", "alternativa rápida"),
-]
-
 IDIOMAS = [
     ("Español", "es"), ("Inglés", "en"), ("Portugués", "pt"), ("Francés", "fr"),
     ("Italiano", "it"), ("Alemán", "de"), ("Catalán", "ca"),
@@ -65,7 +59,6 @@ MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "
 MAX_EN_LISTA = 15
 
 INSTALAR_DIARIZACION = 'uv pip install -e ".[diarizacion]"'
-INSTALAR_CORRECCION = 'uv pip install -e ".[correccion]"'
 
 NOMBRE_MOSTRAR_EN_CARPETA = {"darwin": "Mostrar en Finder", "win32": "Mostrar en el Explorador"}
 
@@ -169,7 +162,6 @@ def iniciar():
 
     acciones = {
         "transcribir": flujo_transcribir,
-        "corregir": flujo_corregir,
         "nombres": flujo_nombres,
         "mis": flujo_mis_transcripciones,
         "configuracion": flujo_configuracion,
@@ -178,7 +170,6 @@ def iniciar():
         try:
             accion = elegir("¿Qué quieres hacer?", [
                 ("Transcribir audio o video", "transcribir"),
-                ("Corregir una transcripción", "corregir"),
                 ("Cambiar nombres de hablantes", "nombres"),
                 ("Mis transcripciones", "mis"),
                 ("Configuración", "configuracion"),
@@ -207,18 +198,16 @@ def iniciar():
 
 def flujo_transcribir():
     prefs = historial.preferencias()
-    instalado_hablantes, instalado_ia = _instalado("pyannote.audio"), _instalado("mlx_lm")
-    modo_hablantes, modo_correccion = ajustes.valor("modo_hablantes"), ajustes.valor("modo_correccion")
+    instalado_hablantes = _instalado("pyannote.audio")
+    modo_hablantes = ajustes.valor("modo_hablantes")
     if not instalado_hablantes and modo_hablantes != ajustes.NUNCA:
         consola.print(f"[dim]{escape(_falta_diarizacion('Para identificar hablantes, instala: '))}[/]")
 
     # Las respuestas: al volver atrás, cada pregunta ofrece lo que ya se había respondido.
-    # Idioma, carpeta y vocabulario (para la corrección) salen de Configuración;
-    # "Más opciones…" los cambia solo para esta vez.
+    # Idioma y carpeta salen de Configuración; "Más opciones…" los cambia solo para esta vez.
     r = {"origen": prefs.get("origen"), "archivo": "", "enlace": "", "modelo": ajustes.valor("modelo"),
-         "hablantes": False, "cuantos": None, "corregir": False,
-         "idioma": ajustes.valor("idioma"), "salida": ajustes.carpeta("carpeta_salida"),
-         "vocabulario": ajustes.valor("vocabulario")}
+         "hablantes": False, "cuantos": None,
+         "idioma": ajustes.valor("idioma"), "salida": ajustes.carpeta("carpeta_salida")}
 
     def origen():
         r["origen"] = elegir("¿De dónde viene?", [
@@ -251,33 +240,21 @@ def flujo_transcribir():
             return False
         r["cuantos"] = elegir("¿Cuántas personas hablan?", CUANTOS, r["cuantos"] or prefs.get("cuantos", NO_LO_SE))
 
-    def corregir():
-        if not instalado_ia or modo_correccion != ajustes.PREGUNTAR:
-            r["corregir"] = instalado_ia and modo_correccion == ajustes.SIEMPRE
-            return False
-        r["corregir"] = si_no("¿Corrijo el texto con IA al terminar?", r.get("corregir_dicho", prefs.get("corregir", False)))
-        r["corregir_dicho"] = r["corregir"]
-
     def empezar():
         while True:
             consola.print(_resumen_transcribir(_entrada(r), r["modelo"], r["hablantes"], r["cuantos"],
-                                               r["corregir"], r["idioma"], r["salida"],
-                                               r["vocabulario"] if r["corregir"] else ""))
+                                               r["idioma"], r["salida"]))
             decision = elegir("¿Empiezo?", [
                 ("Sí, empezar", "empezar"),
-                ("Más opciones… (idioma, vocabulario, carpeta donde guardar)" if r["corregir"]
-                 else "Más opciones… (idioma, carpeta donde guardar)", "mas"),
+                ("Más opciones… (idioma, carpeta donde guardar)", "mas"),
                 ("Cancelar", "cancelar"),
             ])
             if decision != "mas":
                 r["decision"] = decision
                 return
-            vocabulario = r["vocabulario"] if r["corregir"] else None  # sin corregir no sirve
-            r["idioma"], r["salida"], vocabulario = _mas_opciones(r["idioma"], r["salida"], vocabulario)
-            if vocabulario is not None:
-                r["vocabulario"] = vocabulario
+            r["idioma"], r["salida"] = _mas_opciones(r["idioma"], r["salida"])
 
-    seguir_pasos([origen, entrada, modelo, hablantes, cuantos, corregir, empezar])
+    seguir_pasos([origen, entrada, modelo, hablantes, cuantos, empezar])
     if r["decision"] == "cancelar":
         return True
 
@@ -286,8 +263,6 @@ def flujo_transcribir():
     recordar = {"origen": r["origen"], "modelo": r["modelo"], "cuantos": r["cuantos"] or prefs.get("cuantos")}
     if "hablantes_dicho" in r:
         recordar["hablantes"] = r["hablantes"]
-    if "corregir_dicho" in r:
-        recordar["corregir"] = r["corregir"]
     historial.guardar_preferencias(**recordar)
 
     num, minimo = numero_de_hablantes(r["cuantos"])
@@ -297,9 +272,6 @@ def flujo_transcribir():
     if resultado is None:
         return True
 
-    if r["corregir"]:
-        _ejecutar(cli.corregir, archivo=resultado.json_path or resultado.txt_path,
-                  modelo=ajustes.valor("modelo_corrector"), vocabulario=r["vocabulario"])
     return acciones_sobre(resultado.txt_path, resultado.json_path, "¿Y ahora?")
 
 
@@ -316,7 +288,7 @@ def numero_de_hablantes(cuantos: Optional[str]) -> tuple:
     return (None, numero) if "más" in cuantos else (numero, None)
 
 
-def _resumen_transcribir(entrada, modelo, hablantes, cuantos, corregir, idioma, salida, vocabulario="") -> Text:
+def _resumen_transcribir(entrada, modelo, hablantes, cuantos, idioma, salida) -> Text:
     nombre = entrada if es_url(entrada) else Path(entrada).name
     resumen = Text("\nVoy a transcribir ")
     resumen.append(nombre, style="bold")
@@ -329,53 +301,32 @@ def _resumen_transcribir(entrada, modelo, hablantes, cuantos, corregir, idioma, 
             resumen.append(f", identificando {cuantos} hablantes")
         else:
             resumen.append(", identificando quién habla")
-    resumen.append(", y luego corregir" if corregir else "")
     resumen.append(".")
-    if vocabulario:
-        resumen.append(f" Vocabulario para corregir: {vocabulario}.")
     if salida:
         resumen.append(f" Lo guardo en {corta(salida)}.")
     return resumen
 
 
-def _mas_opciones(idioma: str, salida: Optional[Path], vocabulario: Optional[str] = None) -> tuple:
-    """
-    Idioma, carpeta de salida y vocabulario para esta transcripción. "← Volver" regresa a ¿Empiezo?.
-    El vocabulario solo sirve para corregir: con vocabulario=None no se ofrece.
-    """
+def _mas_opciones(idioma: str, salida: Optional[Path]) -> tuple:
+    """Idioma y carpeta de salida para esta transcripción. "← Volver" regresa a ¿Empiezo?."""
     while True:
-        opciones = [(f"Idioma: {_nombre_idioma(idioma)}", "idioma")]
-        if vocabulario is not None:
-            opciones.append((f"Vocabulario para corregir: {_texto_vocabulario(vocabulario)}", "vocabulario"))
-        opciones.append((f"Carpeta donde guardar: {corta(salida) if salida else 'junto al audio'}", "carpeta"))
+        opciones = [
+            (f"Idioma: {_nombre_idioma(idioma)}", "idioma"),
+            (f"Carpeta donde guardar: {corta(salida) if salida else 'junto al audio'}", "carpeta"),
+        ]
         try:
             opcion = elegir("¿Qué quieres cambiar?", opciones)
         except (Atras, KeyboardInterrupt, EOFError):
-            return idioma, salida, vocabulario
+            return idioma, salida
         try:
             if opcion == "idioma":
                 idioma = preguntar_idioma("¿En qué idioma está el audio?", idioma)
-            elif opcion == "vocabulario":
-                vocabulario = preguntar_vocabulario(vocabulario)
             else:
                 elegida = ruta("Carpeta donde guardar (vacío: junto al audio):", validar=_validar_carpeta,
                                solo_carpetas=True, defecto=_para_escribir(salida)).strip()
                 salida = limpiar_ruta(elegida) if elegida else None
         except (Atras, KeyboardInterrupt, EOFError):
             consola.print()
-
-
-def preguntar_vocabulario(actual: str) -> str:
-    """Nombres y siglas que la corrección debe escribir bien. Vacío: ninguno."""
-    consola.print("[dim]Escribe los nombres, siglas o palabras raras que se dicen en el audio, separados por "
-                  "comas. Al corregir, la IA los usará para escribirlos bien.[/]")
-    return texto("Vocabulario (vacío: ninguno):", defecto=actual).strip()
-
-
-def _texto_vocabulario(vocabulario: str, largo: int = 40) -> str:
-    if not vocabulario:
-        return "ninguno"
-    return vocabulario if len(vocabulario) <= largo else vocabulario[:largo - 1].rstrip(" ,") + "…"
 
 
 def preguntar_idioma(mensaje: str, actual: str) -> str:
@@ -394,17 +345,7 @@ def _nombre_idioma(codigo: str) -> str:
     return next((nombre for nombre, valor in IDIOMAS if valor == codigo), codigo)
 
 
-# --- Corregir y nombres -----------------------------------------------------
-
-def flujo_corregir():
-    while True:
-        archivo = elegir_transcripcion("¿Cuál quieres corregir?")
-        try:
-            corregir_archivo(archivo)
-        except Atras:
-            continue  # de vuelta a ¿Cuál?
-        return acciones_sobre(*_txt_y_json(archivo), "¿Y ahora?")
-
+# --- Nombres -----------------------------------------------------
 
 def flujo_nombres():
     while True:
@@ -414,29 +355,6 @@ def flujo_nombres():
         except Atras:
             continue
         return acciones_sobre(*_txt_y_json(archivo), "¿Y ahora?")
-
-
-def corregir_archivo(archivo: Path) -> Optional[Path]:
-    """
-    Pregunta el modelo y si revisar los cambios, y corrige. Retorna el .txt corregido (None si no se pudo).
-    Volver atrás en la primera pregunta lanza Atras.
-    """
-    if not _instalado("mlx_lm"):
-        _avisar(_falta_correccion("Para corregir con IA falta mlx-lm. Instálalo con:\n"))
-        return None
-    prefs = historial.preferencias()
-    r = {"modelo": ajustes.valor("modelo_corrector"), "revisar": prefs.get("revisar", False)}
-
-    def modelo():
-        r["modelo"] = elegir("¿Qué modelo de IA?", _opciones_con_descripcion(MODELOS_IA, ajustes.valor("modelo_corrector")),
-                             r["modelo"])
-
-    def revisar():
-        r["revisar"] = si_no("¿Quieres revisar cada cambio antes de aplicarlo?", r["revisar"])
-
-    seguir_pasos([modelo, revisar])
-    historial.guardar_preferencias(modelo_corrector=r["modelo"], revisar=r["revisar"])
-    return _ejecutar(cli.corregir, archivo=archivo, modelo=r["modelo"], revisar=r["revisar"])
 
 
 def nombrar_archivo(json_path: Path) -> Optional[Path]:
@@ -542,10 +460,7 @@ def _elegir_ajuste(mensaje: str, salida: Optional[Path]) -> str:
     return elegir(mensaje, [
         (f"Idioma: {_nombre_idioma(ajustes.valor('idioma'))}", "idioma"),
         (f"Modelo de transcripción: {ajustes.valor('modelo')}", "modelo"),
-        (f"Modelo de IA para corregir: {ajustes.valor('modelo_corrector')}", "modelo_corrector"),
-        (f"Vocabulario para corregir: {_texto_vocabulario(ajustes.valor('vocabulario'))}", "vocabulario"),
         (f"Identificar hablantes: {_nombre_modo(ajustes.valor('modo_hablantes'))}", "modo_hablantes"),
-        (f"Corregir al terminar: {_nombre_modo(ajustes.valor('modo_correccion'))}", "modo_correccion"),
         (f"Carpeta de descargas: {_texto_descargas()}", "carpeta_descargas"),
         (f"Carpeta de las transcripciones: {corta(salida) if salida else 'junto al audio'}", "carpeta_salida"),
         (f"Sin internet: {'sí' if ajustes.valor('sin_internet') else 'no'}", "sin_internet"),
@@ -559,14 +474,8 @@ def _cambiar_ajuste(clave: str):
         return preguntar_idioma("Idioma por defecto del audio:", actual)
     if clave == "modelo":
         return elegir("Modelo de transcripción por defecto:", _opciones_con_descripcion(MODELOS_WHISPER, actual), actual)
-    if clave == "vocabulario":
-        return preguntar_vocabulario(actual)
-    if clave == "modelo_corrector":
-        return elegir("Modelo de IA para corregir:", _opciones_con_descripcion(MODELOS_IA, actual), actual)
     if clave == "modo_hablantes":
         return elegir("¿Identifico quién habla al transcribir?", MODOS, actual)
-    if clave == "modo_correccion":
-        return elegir("¿Corrijo el texto con IA al terminar de transcribir?", MODOS, actual)
     if clave == "sin_internet":
         return elegir("¿Uso solo los modelos ya descargados?", [
             ("No: revisa si hay versiones nuevas y descarga los modelos que falten", False),
@@ -597,8 +506,6 @@ def _cambiar_ajuste(clave: str):
 def _avisar_si_falta(clave: str, valor):
     if clave == "modo_hablantes" and valor != ajustes.NUNCA and not _instalado("pyannote.audio"):
         consola.print(f"[yellow]{escape(_falta_diarizacion('Para identificar hablantes falta instalar: '))}[/]")
-    if clave in ("modo_correccion", "modelo_corrector") and valor != ajustes.NUNCA and not _instalado("mlx_lm"):
-        consola.print(f"[yellow]{escape(_falta_correccion('Para corregir con IA falta instalar: '))}[/]")
 
 
 def _nombre_modo(modo: str) -> str:
@@ -649,18 +556,12 @@ def flujo_mis_transcripciones():
 
 def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: bool = False):
     """
-    Lo que se puede hacer con una transcripción: abrirla, corregirla, cambiar nombres...
+    Lo que se puede hacer con una transcripción: abrirla, cambiar nombres...
     Retorna False si eliges Salir (para cerrar el programa), True para volver al menú.
     Con volver, ofrece "← Volver" (lanza Atras, para regresar a la lista de donde se eligió).
     """
-    from src.corrector import rutas_de_salida
-
     while True:
-        corregido = rutas_de_salida(json_path or txt)[0]
         opciones = [("Abrir la transcripción", "abrir")]
-        if corregido.exists():
-            opciones.append(("Abrir la versión corregida", "abrir_corregida"))
-        opciones.append(("Corregir otra vez" if corregido.exists() else "Corregir esta transcripción", "corregir"))
         if json_path:
             opciones.append(("Cambiar nombres de hablantes", "nombres"))
         opciones += [
@@ -679,12 +580,8 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
         try:
             if opcion == "abrir":
                 abrir(txt)
-            elif opcion == "abrir_corregida":
-                abrir(corregido)
             elif opcion == "carpeta":
                 abrir(txt, revelar=True)
-            elif opcion == "corregir":
-                corregir_archivo(json_path or txt)
             elif opcion == "nombres":
                 nombrar_archivo(json_path)
         except (Atras, KeyboardInterrupt, EOFError):
@@ -693,8 +590,7 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
 
 
 def etiquetas(entradas: list) -> list:
-    """'entrevista   · hoy 10:42 · 1 h 10 min · Ana, Luis · corregida', alineadas por el nombre."""
-    from src.corrector import rutas_de_salida
+    """'entrevista   · hoy 10:42 · 1 h 10 min · Ana, Luis', alineadas por el nombre."""
     from utils.formatters import cargar_transcripcion
 
     nombres = [_nombre(e["txt"]) for e in entradas]
@@ -717,8 +613,6 @@ def etiquetas(entradas: list) -> list:
             partes.append(cli._duracion(duracion))
         if hablantes:
             partes.append(", ".join(hablantes) if len(hablantes) <= 3 else f"{len(hablantes)} hablantes")
-        if rutas_de_salida(e["json"] or e["txt"])[0].exists():
-            partes.append("corregida")
         resultado.append(" · ".join(partes))
     return resultado
 
@@ -778,13 +672,6 @@ def _falta_diarizacion(como_instalar: str) -> str:
     if not plataforma.hablantes_disponible():
         return plataforma.SIN_HABLANTES
     return como_instalar + INSTALAR_DIARIZACION
-
-
-def _falta_correccion(como_instalar: str) -> str:
-    """Cómo instalar la corrección con IA, o por qué no se puede en este computador."""
-    if not plataforma.correccion_disponible():
-        return plataforma.SIN_CORRECCION
-    return como_instalar + INSTALAR_CORRECCION
 
 
 def _instalado(modulo: str) -> bool:

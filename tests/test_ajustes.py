@@ -10,19 +10,18 @@ from src import ajustes, config, historial
 def test_sin_cambios_vale_lo_de_fabrica():
     assert ajustes.valor("idioma") == "es"
     assert ajustes.valor("modelo") == config.DEFAULT_MODEL
-    assert ajustes.valor("modelo_corrector") == config.CORRECTOR_MODEL
     assert ajustes.valor("modo_hablantes") == ajustes.PREGUNTAR
     assert ajustes.carpeta("carpeta_descargas") == Path(config.DOWNLOAD_DIR)
     assert ajustes.carpeta("carpeta_salida") is None
 
 
 def test_lo_guardado_gana(tmp_path):
-    ajustes.guardar(idioma="en", modelo="turbo", carpeta_salida="~/Textos", modo_correccion=ajustes.SIEMPRE)
+    ajustes.guardar(idioma="en", modelo="turbo", carpeta_salida="~/Textos", modo_hablantes=ajustes.SIEMPRE)
 
     assert ajustes.valor("idioma") == "en"
     assert ajustes.valor("modelo") == "turbo"
     assert ajustes.carpeta("carpeta_salida") == Path.home() / "Textos"
-    assert ajustes.valor("modo_correccion") == ajustes.SIEMPRE
+    assert ajustes.valor("modo_hablantes") == ajustes.SIEMPRE
 
 
 def test_se_guarda_con_las_preferencias_del_menu():
@@ -71,3 +70,10 @@ def test_sin_internet_corrige_huggingface_hub_si_ya_se_importo(monkeypatch):
 def test_telemetria_de_pyannote_y_hugging_face_apagada():
     assert os.environ["PYANNOTE_METRICS_ENABLED"] == "false"
     assert os.environ["HF_HUB_DISABLE_TELEMETRY"] == "1"
+
+
+def test_ajustes_viejos_de_correccion_se_ignoran():
+    historial.guardar_preferencias(modo_correccion="siempre", vocabulario="COSAM", modelo_corrector="qwen3-8b",
+                                   idioma="en")
+    assert ajustes.valor("idioma") == "en"
+    assert ajustes.valor("modo_hablantes") == ajustes.PREGUNTAR

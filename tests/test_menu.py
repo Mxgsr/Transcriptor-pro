@@ -73,8 +73,8 @@ def guion(monkeypatch):
 
 @pytest.fixture
 def instalado(monkeypatch):
-    """Por defecto, como en el Mac de Max: diarización y corrección instaladas."""
-    modulos = {"pyannote.audio": True, "mlx_lm": True}
+    """Por defecto, como en el Mac de Max: diarización instalada."""
+    modulos = {"pyannote.audio": True}
     monkeypatch.setattr(menu, "_instalado", lambda modulo: modulos[modulo])
     return modulos
 
@@ -97,13 +97,11 @@ def comandos(monkeypatch, tmp_path):
 
     simulados = SimpleNamespace(
         transcribir=MagicMock(side_effect=transcribir),
-        corregir=MagicMock(return_value=tmp_path / "entrevista.corregido.blocks.txt"),
         poner_nombres=MagicMock(return_value=txt),
         txt=txt,
         json=json_path,
     )
     monkeypatch.setattr(cli, "ejecutar_transcripcion", simulados.transcribir)
-    monkeypatch.setattr(cli, "corregir", simulados.corregir)
     monkeypatch.setattr(cli, "poner_nombres", simulados.poner_nombres)
     return simulados
 
@@ -117,14 +115,13 @@ def audio(tmp_path):
 
 # --- Transcribir --------------------------------------------------------------
 
-def test_transcribir_con_hablantes_y_correccion(guion, instalado, comandos, audio):
+def test_transcribir_con_hablantes(guion, instalado, comandos, audio):
     guion(
         ("¿De dónde viene?", "archivo"),
         ("Arrastra el archivo", str(audio).replace(" ", "\\ ")),  # como lo deja la Terminal al arrastrar
         ("¿Qué modelo uso?", "turbo"),
         ("¿Identifico quién habla?", True),
         ("¿Cuántas personas hablan?", "3"),
-        ("¿Corrijo el texto con IA", True),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "salir"),
     )
@@ -134,19 +131,17 @@ def test_transcribir_con_hablantes_y_correccion(guion, instalado, comandos, audi
     comandos.transcribir.assert_called_once_with(
         entrada=str(audio), modelo="turbo", hablantes=True, num=3, minimo=None, idioma="es", salida=None,
         carpeta_descargas=Path("downloads"))
-    comandos.corregir.assert_called_once_with(archivo=comandos.json, modelo="qwen3-8b", vocabulario="")
     assert historial.preferencias() == {
-        "origen": "archivo", "modelo": "turbo", "hablantes": True, "cuantos": "3", "corregir": True}
+        "origen": "archivo", "modelo": "turbo", "hablantes": True, "cuantos": "3"}
 
 
 def test_transcribir_ofrece_lo_ultimo_que_elegiste(guion, instalado, comandos):
-    historial.guardar_preferencias(origen="enlace", modelo="large", hablantes=False, corregir=True)
+    historial.guardar_preferencias(origen="enlace", modelo="large", hablantes=False)
     guion(
         ("¿De dónde viene?", "enlace"),
         ("Pega el enlace", "https://youtu.be/abc"),
         ("¿Qué modelo uso?", "large"),
         ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", False),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
@@ -156,11 +151,9 @@ def test_transcribir_ofrece_lo_ultimo_que_elegiste(guion, instalado, comandos):
     assert guion.defecto_de("¿De dónde viene?") == "enlace"
     assert guion.defecto_de("¿Qué modelo uso?") == "large"
     assert guion.defecto_de("¿Identifico quién habla?") is False
-    assert guion.defecto_de("¿Corrijo el texto") is True
     comandos.transcribir.assert_called_once_with(
         entrada="https://youtu.be/abc", modelo="large", hablantes=False, num=None, minimo=None,
         idioma="es", salida=None, carpeta_descargas=Path("downloads"))
-    comandos.corregir.assert_not_called()
 
 
 def test_mas_opciones_cambia_idioma_y_carpeta(guion, instalado, comandos, audio, tmp_path):
@@ -169,7 +162,6 @@ def test_mas_opciones_cambia_idioma_y_carpeta(guion, instalado, comandos, audio,
         ("Arrastra el archivo", f'"{audio}"'),
         ("¿Qué modelo uso?", "small"),
         ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", False),
         ("¿Empiezo?", "mas"),
         ("¿Qué quieres cambiar?", "idioma"),
         ("¿En qué idioma", "otro"),
@@ -196,7 +188,6 @@ def test_cancelar_no_transcribe_ni_guarda_preferencias(guion, instalado, comando
         ("Pega el enlace", "https://youtu.be/abc"),
         ("¿Qué modelo uso?", "turbo"),
         ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", False),
         ("¿Empiezo?", "cancelar"),
     )
 
@@ -205,8 +196,8 @@ def test_cancelar_no_transcribe_ni_guarda_preferencias(guion, instalado, comando
     assert historial.preferencias() == {}
 
 
-def test_sin_diarizacion_ni_correccion_instaladas_no_las_pregunta(guion, instalado, comandos, capsys):
-    instalado.update({"pyannote.audio": False, "mlx_lm": False})
+def test_sin_diarizacion_instalada_no_pregunta_por_hablantes(guion, instalado, comandos, capsys):
+    instalado.update({"pyannote.audio": False})
     guion(
         ("¿De dónde viene?", "enlace"),
         ("Pega el enlace", "https://youtu.be/abc"),
@@ -221,19 +212,17 @@ def test_sin_diarizacion_ni_correccion_instaladas_no_las_pregunta(guion, instala
     assert 'uv pip install -e ".[diarizacion]"' in " ".join(capsys.readouterr().out.split())
 
 
-def test_si_la_transcripcion_falla_vuelve_al_menu_sin_corregir(guion, instalado, comandos):
+def test_si_la_transcripcion_falla_vuelve_al_menu(guion, instalado, comandos):
     comandos.transcribir.side_effect = typer.Exit(1)
     guion(
         ("¿De dónde viene?", "enlace"),
         ("Pega el enlace", "https://youtu.be/abc"),
         ("¿Qué modelo uso?", "turbo"),
         ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", True),
         ("¿Empiezo?", "empezar"),
     )
 
     assert menu.flujo_transcribir() is True
-    comandos.corregir.assert_not_called()
 
 
 def test_el_modelo_del_env_aparece_aunque_no_este_en_la_lista(monkeypatch):
@@ -250,7 +239,7 @@ def test_numero_de_hablantes(cuantos, esperado):
     assert menu.numero_de_hablantes(cuantos) == esperado
 
 
-# --- Corregir, nombres y Mis transcripciones ------------------------------------
+# --- Nombres y Mis transcripciones ------------------------------------
 
 @pytest.fixture
 def con_historial(comandos):
@@ -258,49 +247,6 @@ def con_historial(comandos):
     comandos.transcribir(hablantes=True)
     historial.registrar(comandos.txt, comandos.json, duracion=4210)
     return comandos
-
-
-def test_corregir_una_del_historial(guion, instalado, con_historial):
-    guion(
-        ("¿Cuál quieres corregir?", 0),
-        ("¿Qué modelo de IA?", "qwen3-4b"),
-        ("¿Quieres revisar cada cambio", True),
-        ("¿Y ahora?", "menu"),
-    )
-
-    menu.flujo_corregir()
-
-    con_historial.corregir.assert_called_once_with(archivo=con_historial.json, modelo="qwen3-4b", revisar=True)
-    etiqueta = guion.opciones_de("¿Cuál quieres corregir?")[0][0]
-    assert etiqueta.startswith("entrevista · hoy ")
-    assert "1 h 10 min · Hablante 1, Hablante 2" in etiqueta
-    assert historial.preferencias() == {"modelo_corrector": "qwen3-4b", "revisar": True}
-
-
-def test_corregir_sin_mlx_lm_explica_como_instalarlo(guion, instalado, con_historial, capsys):
-    instalado["mlx_lm"] = False
-    guion(("¿Cuál quieres corregir?", 0), ("¿Y ahora?", "menu"))
-
-    menu.flujo_corregir()
-
-    con_historial.corregir.assert_not_called()
-    assert 'uv pip install -e ".[correccion]"' in " ".join(capsys.readouterr().err.split())
-
-
-def test_corregir_buscando_otro_archivo_lo_anota_en_el_historial(guion, instalado, comandos, tmp_path):
-    otra = tmp_path / "otra.blocks.txt"
-    otra.write_text("[00:00:00] Hola\n", encoding="utf-8")
-    guion(
-        ("Arrastra el .blocks.json o el .blocks.txt", str(otra)),  # historial vacío: va directo a buscar
-        ("¿Qué modelo de IA?", "qwen3-8b"),
-        ("¿Quieres revisar cada cambio", False),
-        ("¿Y ahora?", "menu"),
-    )
-
-    menu.flujo_corregir()
-
-    comandos.corregir.assert_called_once_with(archivo=otra, modelo="qwen3-8b", revisar=False)
-    assert [e["txt"] for e in historial.listar()] == [otra.resolve()]
 
 
 def test_nombres_escribiendo_la_lista(guion, instalado, con_historial):
@@ -354,17 +300,6 @@ def test_mis_transcripciones_abrir_y_mostrar_en_carpeta(guion, instalado, con_hi
     assert abrir.call_args_list[0].args == (con_historial.txt,)
     assert abrir.call_args_list[1].args == (con_historial.txt,)
     assert abrir.call_args_list[1].kwargs == {"revelar": True}
-
-
-def test_acciones_ofrecen_la_version_corregida_si_existe(guion, con_historial, tmp_path):
-    (tmp_path / "entrevista.corregido.blocks.txt").write_text("[00:00:00] Hola.\n", encoding="utf-8")
-    guion(("¿Y ahora?", "menu"))
-
-    menu.acciones_sobre(con_historial.txt, con_historial.json, "¿Y ahora?")
-
-    valores = [valor for _, valor in guion.opciones_de("¿Y ahora?")]
-    assert valores[:3] == ["abrir", "abrir_corregida", "corregir"]
-    assert "Corregir otra vez" in [t for t, _ in guion.opciones_de("¿Y ahora?")]
 
 
 # --- Menú principal -----------------------------------------------------------
@@ -475,12 +410,8 @@ def test_configuracion_cambia_y_guarda_cada_ajuste(guion, instalado, tmp_path, c
         ("Idioma por defecto", "en"),
         ("¿Algo más?", "modelo"),
         ("Modelo de transcripción", "large"),
-        ("¿Algo más?", "modelo_corrector"),
-        ("Modelo de IA para corregir", "qwen3-4b"),
         ("¿Algo más?", "modo_hablantes"),
         ("¿Identifico quién habla", ajustes.SIEMPRE),
-        ("¿Algo más?", "modo_correccion"),
-        ("¿Corrijo el texto", ajustes.NUNCA),
         ("¿Algo más?", "carpeta_descargas"),
         ("Carpeta para el audio", str(descargas).replace(" ", "\\ ")),
         ("¿Algo más?", "carpeta_salida"),
@@ -493,17 +424,14 @@ def test_configuracion_cambia_y_guarda_cada_ajuste(guion, instalado, tmp_path, c
 
     assert ajustes.valor("idioma") == "en"
     assert ajustes.valor("modelo") == "large"
-    assert ajustes.valor("modelo_corrector") == "qwen3-4b"
     assert ajustes.valor("modo_hablantes") == ajustes.SIEMPRE
-    assert ajustes.valor("modo_correccion") == ajustes.NUNCA
     assert ajustes.carpeta("carpeta_descargas") == descargas.resolve()
     assert ajustes.carpeta("carpeta_salida") == textos.resolve()
-    assert capsys.readouterr().out.count("Guardado") == 7
+    assert capsys.readouterr().out.count("Guardado") == 5
     # Cada opción muestra su valor actual
     ultima = [t for t, _ in [h for h in guion.hechas if h[0] == "¿Algo más?"][-1][1]]
     assert "Idioma: Inglés" in ultima
     assert "Identificar hablantes: siempre" in ultima
-    assert "Corregir al terminar: nunca" in ultima
 
 
 def test_configuracion_sin_internet(guion, instalado, monkeypatch):
@@ -551,7 +479,7 @@ def test_configuracion_ctrl_c_en_una_pregunta_vuelve_a_la_lista(guion, instalado
 
 
 def test_configuracion_avisa_si_falta_instalar_algo(guion, instalado, capsys):
-    instalado.update({"pyannote.audio": False, "mlx_lm": False})
+    instalado.update({"pyannote.audio": False})
     guion(
         ("¿Qué quieres cambiar?", "modo_hablantes"),
         ("¿Identifico quién habla", ajustes.SIEMPRE),
@@ -569,14 +497,14 @@ def test_carpeta_de_descargas_de_fabrica_explica_donde_queda():
 
 def test_transcribir_respeta_la_configuracion(guion, instalado, comandos, tmp_path):
     ajustes.guardar(idioma="en", carpeta_salida=str(tmp_path / "textos"), carpeta_descargas=str(tmp_path / "yt"),
-                    modo_hablantes=ajustes.SIEMPRE, modo_correccion=ajustes.NUNCA, modelo_corrector="qwen3-4b")
+                    modo_hablantes=ajustes.SIEMPRE)
     historial.guardar_preferencias(hablantes=False)
     guion(
         ("¿De dónde viene?", "enlace"),
         ("Pega el enlace", "https://youtu.be/abc"),
         ("¿Qué modelo uso?", "turbo"),
         ("¿Cuántas personas hablan?", "2"),  # no pregunta si identificar: siempre
-        ("¿Empiezo?", "empezar"),            # ni si corregir: nunca
+        ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
 
@@ -585,26 +513,9 @@ def test_transcribir_respeta_la_configuracion(guion, instalado, comandos, tmp_pa
     comandos.transcribir.assert_called_once_with(
         entrada="https://youtu.be/abc", modelo="turbo", hablantes=True, num=2, minimo=None, idioma="en",
         salida=tmp_path / "textos", carpeta_descargas=tmp_path / "yt")
-    comandos.corregir.assert_not_called()
     # La respuesta anterior a "¿Identifico quién habla?" se conserva para cuando vuelva a preguntar
     assert historial.preferencias()["hablantes"] is False
     assert ajustes.valor("modelo") == "turbo"
-
-
-def test_transcribir_corrige_siempre_con_el_modelo_configurado(guion, instalado, comandos):
-    ajustes.guardar(modo_hablantes=ajustes.NUNCA, modo_correccion=ajustes.SIEMPRE, modelo_corrector="gemma4-e4b")
-    guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Empiezo?", "empezar"),
-        ("¿Y ahora?", "menu"),
-    )
-
-    menu.flujo_transcribir()
-
-    assert comandos.transcribir.call_args.kwargs["hablantes"] is False
-    comandos.corregir.assert_called_once_with(archivo=comandos.txt, modelo="gemma4-e4b", vocabulario="")
 
 
 def test_corta():
@@ -625,12 +536,9 @@ def test_transcribir_volver_atras_repite_la_pregunta_anterior_con_lo_respondido(
         ("¿Qué modelo uso?", "small"),
         ("¿Identifico quién habla?", True),
         ("¿Cuántas personas hablan?", "2"),
-        ("¿Corrijo el texto con IA", False),
         ("¿Empiezo?", menu.Atras),               # quiero revisar antes de empezar
-        ("¿Corrijo el texto con IA", menu.Atras),
         ("¿Cuántas personas hablan?", menu.Atras),
         ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", False),
         ("¿Empiezo?", "empezar"),
         ("¿Y ahora?", "menu"),
     )
@@ -656,7 +564,7 @@ def test_volver_en_la_primera_pregunta_sale_del_flujo(guion, instalado, comandos
 
 
 def test_volver_se_salta_las_preguntas_que_no_se_hicieron(guion, instalado, comandos):
-    ajustes.guardar(modo_hablantes=ajustes.SIEMPRE, modo_correccion=ajustes.NUNCA)
+    ajustes.guardar(modo_hablantes=ajustes.SIEMPRE)
     guion(
         ("¿De dónde viene?", "enlace"),
         ("Pega el enlace", "https://youtu.be/abc"),
@@ -679,7 +587,6 @@ def test_mas_opciones_volver_regresa_a_empiezo(guion, instalado, comandos):
         ("Pega el enlace", "https://youtu.be/abc"),
         ("¿Qué modelo uso?", "turbo"),
         ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", False),
         ("¿Empiezo?", "mas"),
         ("¿Qué quieres cambiar?", "idioma"),
         ("¿En qué idioma", menu.Atras),             # no cambia nada
@@ -696,34 +603,16 @@ def test_mas_opciones_volver_regresa_a_empiezo(guion, instalado, comandos):
     assert (opciones["idioma"], opciones["salida"]) == ("es", None)
 
 
-def test_corregir_volver_desde_el_modelo_regresa_a_elegir_la_transcripcion(guion, instalado, con_historial):
-    guion(
-        ("¿Cuál quieres corregir?", 0),
-        ("¿Qué modelo de IA?", "qwen3-4b"),
-        ("¿Quieres revisar cada cambio", menu.Atras),
-        ("¿Qué modelo de IA?", menu.Atras),
-        ("¿Cuál quieres corregir?", 0),
-        ("¿Qué modelo de IA?", "qwen3-8b"),
-        ("¿Quieres revisar cada cambio", False),
-        ("¿Y ahora?", "menu"),
-    )
-
-    menu.flujo_corregir()
-
-    assert [d for m, _, d in guion.hechas if "¿Qué modelo de IA?" in m] == ["qwen3-8b", "qwen3-4b", "qwen3-8b"]
-    con_historial.corregir.assert_called_once_with(archivo=con_historial.json, modelo="qwen3-8b", revisar=False)
-
-
 def test_buscar_otro_archivo_y_volver_regresa_a_la_lista(guion, instalado, con_historial):
     guion(
-        ("¿Cuál quieres corregir?", "buscar"),
+        ("¿A cuál le cambio los nombres?", "buscar"),
         ("Arrastra el .blocks.json", menu.Atras),
-        ("¿Cuál quieres corregir?", menu.Atras),
+        ("¿A cuál le cambio los nombres?", menu.Atras),
     )
 
     with pytest.raises(menu.Atras):
-        menu.flujo_corregir()
-    con_historial.corregir.assert_not_called()
+        menu.flujo_nombres()
+    con_historial.poner_nombres.assert_not_called()
 
 
 def test_nombres_volver_desde_la_lista_de_nombres(guion, instalado, con_historial):
@@ -801,25 +690,10 @@ def test_volver_y_esc_con_questionary_de_verdad():
     assert _responder("hola\r", lambda: menu.texto("¿Nombre?")) == "hola"
 
 
-def test_en_windows_corregir_explica_que_solo_funciona_en_mac(guion, instalado, con_historial, capsys, monkeypatch):
-    from src import plataforma
-
-    instalado["mlx_lm"] = False
-    monkeypatch.setattr(plataforma, "correccion_disponible", lambda: False)
-    guion(("¿Cuál quieres corregir?", 0), ("¿Y ahora?", "menu"))
-
-    menu.flujo_corregir()
-
-    con_historial.corregir.assert_not_called()
-    error = " ".join(capsys.readouterr().err.split())
-    assert "solo funciona en Macs con chip Apple" in error
-    assert "uv pip install" not in error
-
-
 def test_en_mac_intel_no_ofrece_instalar_hablantes(guion, instalado, comandos, capsys, monkeypatch):
     from src import plataforma
 
-    instalado.update({"pyannote.audio": False, "mlx_lm": False})
+    instalado.update({"pyannote.audio": False})
     monkeypatch.setattr(plataforma, "hablantes_disponible", lambda: False)
     guion(
         ("¿De dónde viene?", "enlace"),
@@ -857,73 +731,3 @@ def test_limpiar_ruta_en_windows_respeta_las_barras(monkeypatch):
     assert str(menu.limpiar_ruta(r'"C:\Users\max\Mi audio.m4a"')) == str(Path(r"C:\Users\max\Mi audio.m4a"))
 
 
-def test_mas_opciones_cambia_el_vocabulario_para_corregir_solo_esta_vez(guion, instalado, comandos, capsys):
-    ajustes.guardar(vocabulario="FOSIS")
-    guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", True),
-        ("¿Empiezo?", "mas"),
-        ("¿Qué quieres cambiar?", "vocabulario"),
-        ("Vocabulario", "COSAM, OSL, señorita Catalina"),
-        ("¿Qué quieres cambiar?", menu.Atras),
-        ("¿Empiezo?", "empezar"),
-        ("¿Y ahora?", "menu"),
-    )
-
-    menu.flujo_transcribir()
-
-    assert guion.defecto_de("Vocabulario") == "FOSIS"
-    assert "vocabulario" not in comandos.transcribir.call_args.kwargs
-    assert comandos.corregir.call_args.kwargs["vocabulario"] == "COSAM, OSL, señorita Catalina"
-    assert "Vocabulario para corregir: COSAM, OSL, señorita Catalina." in " ".join(capsys.readouterr().out.split())
-    assert ajustes.valor("vocabulario") == "FOSIS"
-
-
-def test_sin_corregir_no_se_ofrece_el_vocabulario(guion, instalado, comandos):
-    ajustes.guardar(vocabulario="FOSIS")
-    guion(
-        ("¿De dónde viene?", "enlace"),
-        ("Pega el enlace", "https://youtu.be/abc"),
-        ("¿Qué modelo uso?", "turbo"),
-        ("¿Identifico quién habla?", False),
-        ("¿Corrijo el texto con IA", False),
-        ("¿Empiezo?", "mas"),
-        ("¿Qué quieres cambiar?", menu.Atras),
-        ("¿Empiezo?", "empezar"),
-        ("¿Y ahora?", "menu"),
-    )
-
-    menu.flujo_transcribir()
-
-    opciones = [valor for _, valor in [h for h in guion.hechas if h[0] == "¿Qué quieres cambiar?"][0][1]]
-    assert opciones == ["idioma", "carpeta"]
-
-
-def test_configuracion_guarda_y_borra_el_vocabulario(guion, instalado):
-    guion(
-        ("¿Qué quieres cambiar?", "vocabulario"),
-        ("Vocabulario", "COSAM, OSL"),
-        ("¿Algo más?", menu.Atras),
-    )
-    menu.flujo_configuracion()
-    assert ajustes.valor("vocabulario") == "COSAM, OSL"
-    ultima = [t for t, _ in [h for h in guion.hechas if h[0] == "¿Algo más?"][-1][1]]
-    assert "Vocabulario para corregir: COSAM, OSL" in ultima
-
-    guion(
-        ("¿Qué quieres cambiar?", "vocabulario"),
-        ("Vocabulario", ""),
-        ("¿Algo más?", menu.Atras),
-    )
-    menu.flujo_configuracion()
-    assert ajustes.valor("vocabulario") == ""
-
-
-def test_texto_vocabulario_largo_se_acorta():
-    assert menu._texto_vocabulario("") == "ninguno"
-    largo = "COSAM, OSL, FOSIS, señorita Catalina, Alejandro Parra, Programa Familias"
-    assert menu._texto_vocabulario(largo).endswith("…")
-    assert len(menu._texto_vocabulario(largo)) <= 40
