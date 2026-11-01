@@ -528,3 +528,84 @@ def test_asignar_hablantes_sin_turnos_deja_las_etiquetas_vacias():
     etiquetas = {}
     asignar_hablantes([_seg(0, 1, "Hola")], [], etiquetas=etiquetas)
     assert etiquetas == {}
+
+
+# --- Frases con hablante dudoso (clave "dudosa" de cada segmento) ---
+
+def _turno(inicio, fin, hablante):
+    return {"start": inicio, "end": fin, "speaker": hablante}
+
+
+def test_dudosa_repartida_cuando_una_palabra_votaba_por_otro_y_se_absorbio():
+    # La última palabra (2,1 a 2,4 s) cae en el turno de B, pero es un trozo de 1 palabra: se suma a A
+    palabras = _palabras("uno dos tres cuatro cinco seis siete ocho", 0.0)
+    cierre = _palabras("Listo ya.", 3.0)
+    turnos = [_turno(0.0, 2.0, "A"), _turno(2.0, 6.0, "B")]
+    resultado = asignar_hablantes([_con_palabras(palabras), _con_palabras(cierre)], turnos)
+    assert resultado[0]["speaker"] == "Hablante 1"
+    assert resultado[0]["dudosa"] == {"otro": "Hablante 2", "motivo": "repartida"}
+    assert resultado[0]["text"] == "uno dos tres cuatro cinco seis siete ocho"
+
+
+def test_dudosa_fuera_de_turno_cuando_no_se_solapa_con_ningun_turno_y_hay_otro_cerca():
+    palabras = _palabras("bueno entonces", 2.3)  # 2,3 a 2,9 s: entre el turno de A y el de B
+    despues = _palabras("Hola a todos de nuevo en esta reunión.", 4.2)
+    turnos = [_turno(0.0, 2.0, "A"), _turno(4.0, 7.0, "B")]
+    resultado = asignar_hablantes([_con_palabras(palabras), _con_palabras(despues)], turnos)
+    assert resultado[0]["speaker"] == "Hablante 1"
+    assert resultado[0]["dudosa"] == {"otro": "Hablante 2", "motivo": "fuera_de_turno"}
+
+
+def test_dudosa_fuera_de_turno_no_se_marca_si_el_otro_turno_esta_lejos():
+    palabras = _palabras("bueno entonces", 2.3)
+    despues = _palabras("Hola a todos de nuevo en esta reunión.", 9.2)
+    turnos = [_turno(0.0, 2.0, "A"), _turno(9.0, 12.0, "B")]
+    resultado = asignar_hablantes([_con_palabras(palabras), _con_palabras(despues)], turnos)
+    assert resultado[0].get("dudosa", {}).get("motivo") != "fuera_de_turno"
+
+
+def test_dudosa_borde_en_una_frase_corta_pegada_a_un_cambio_de_hablante():
+    largo1 = _palabras("eso es lo que pasó ayer en la oficina.", 0.0)  # 8 palabras, 2,4 s
+    corta = _palabras("Sí.", 3.1)
+    largo2 = _palabras("entonces seguimos con el tema de la semana pasada.", 3.6)
+    turnos = [_turno(0.0, 3.0, "A"), _turno(3.0, 3.5, "B"), _turno(3.5, 8.0, "A")]
+    resultado = asignar_hablantes([_con_palabras(largo1), _con_palabras(corta), _con_palabras(largo2)], turnos)
+    assert [s["speaker"] for s in resultado] == ["Hablante 1", "Hablante 2", "Hablante 1"]
+    assert resultado[1]["dudosa"] == {"otro": "Hablante 1", "motivo": "borde"}
+    assert "dudosa" not in resultado[0] and "dudosa" not in resultado[2]
+
+
+def test_dudosa_borde_no_pisa_una_marca_repartida():
+    # 6 palabras pegadas a un cambio (candidata a borde) y con una palabra absorbida: queda "repartida"
+    palabras = _palabras("uno dos tres cuatro cinco seis", 0.0)
+    cierre = _palabras("Ya.", 2.6)
+    turnos = [_turno(0.0, 1.5, "A"), _turno(1.5, 6.0, "B")]
+    resultado = asignar_hablantes([_con_palabras(palabras), _con_palabras(cierre)], turnos)
+    assert resultado[0]["dudosa"]["motivo"] == "repartida"
+
+
+def test_sin_dudas_no_hay_clave_y_el_texto_no_cambia():
+    palabras = _palabras("esto lo dice una sola persona durante un buen rato seguido.", 0.0)
+    resultado = asignar_hablantes([_con_palabras(palabras)], [_turno(0.0, 6.0, "A")])
+    assert len(resultado) == 1
+    assert "dudosa" not in resultado[0]
+    assert resultado[0]["text"] == "esto lo dice una sola persona durante un buen rato seguido."
+
+
+def test_dudosa_se_descarta_si_la_otra_persona_nunca_habla_como_principal():
+    # C solo tiene un turno cerca, pero ninguna frase es suya: no tendría etiqueta "Hablante N"
+    palabras = _palabras("bueno entonces", 2.3)
+    despues = _palabras("Hola a todos de nuevo en esta reunión.", 6.0)
+    turnos = [_turno(0.0, 2.0, "A"), _turno(3.5, 4.0, "C"), _turno(5.9, 9.0, "A")]
+    etiquetas = {}
+    resultado = asignar_hablantes([_con_palabras(palabras), _con_palabras(despues)], turnos, etiquetas=etiquetas)
+    assert all("dudosa" not in s for s in resultado)
+    assert set(etiquetas) == {"A"}
+
+
+def test_dudosa_nunca_coincide_con_el_hablante_de_la_frase():
+    largo = _palabras("eso es lo que pasó ayer en la oficina.", 0.0)
+    corta = _palabras("Sí.", 3.1)
+    turnos = [_turno(0.0, 3.0, "A"), _turno(3.0, 6.0, "B")]
+    for s in asignar_hablantes([_con_palabras(largo), _con_palabras(corta)], turnos):
+        assert s.get("dudosa", {}).get("otro") != s["speaker"]

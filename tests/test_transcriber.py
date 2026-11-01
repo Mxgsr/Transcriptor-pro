@@ -330,3 +330,30 @@ def test_cargar_audio_con_faster_whisper(tmp_path, monkeypatch):
 
     assert llamadas == [(str(tmp_path / "a.mp3"), 16000)]
     assert onda.dtype == np.float32 and onda.tolist() == [0.0, 0.5]
+
+
+def test_agrupar_lleva_las_frases_dudosas_al_parrafo():
+    segs = [
+        {**seg(0, 2, "Primera frase."), "speaker": "Hablante 1"},
+        {**seg(2, 3, "Dudosa."), "speaker": "Hablante 1", "dudosa": {"otro": "Hablante 2", "motivo": "borde"}},
+        {**seg(3, 5, "Respuesta."), "speaker": "Hablante 2"},
+    ]
+    parrafos = agrupar_segmentos_en_parrafos(segs)
+    assert parrafos[0]["text"] == "Primera frase. Dudosa."
+    assert parrafos[0]["dudosas"] == [{"start": 2, "end": 3, "text": "Dudosa.", "otro": "Hablante 2", "motivo": "borde"}]
+    assert "dudosas" not in parrafos[1]
+
+
+def test_agrupar_sin_dudas_no_agrega_la_clave():
+    segs = [{**seg(0, 2, "Hola."), "speaker": "Hablante 1"}]
+    assert agrupar_segmentos_en_parrafos(segs) == [{"start": 0, "end": 2, "text": "Hola.", "speaker": "Hablante 1"}]
+
+
+def test_dudosas_sobreviven_a_limpiar_parrafos_y_a_guardar_json(tmp_path):
+    from src.repeticiones import limpiar_parrafos
+    from utils.formatters import cargar_json, guardar_json
+    segs = [{**seg(0, 2, "Hola."), "speaker": "Hablante 1",
+             "dudosa": {"otro": "Hablante 2", "motivo": "repartida"}}]
+    parrafos = limpiar_parrafos(agrupar_segmentos_en_parrafos(segs))
+    guardar_json(parrafos, tmp_path / "a.blocks.json")
+    assert cargar_json(tmp_path / "a.blocks.json")[0]["dudosas"][0]["motivo"] == "repartida"

@@ -2,6 +2,7 @@
 # Menú con flechas que se abre al escribir `transcriptor` sin nada más.
 # Aquí solo se hacen preguntas: el trabajo lo hacen los mismos comandos de src/cli.py.
 import importlib.util
+import logging
 import os
 import re
 import shutil
@@ -16,9 +17,10 @@ import typer
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from rich.markup import escape
 from rich.panel import Panel
+from rich.progress import BarColumn, DownloadColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
-from src import ajustes, aviso, cli, historial, plataforma, voces
+from src import actualizar, ajustes, aviso, buscar, cli, clic_derecho, historial, modelos, plataforma, vista, voces
 from src.diarizer import parsear_nombres
 from utils.formatters import a_fecha
 from utils.validators import es_url
@@ -67,8 +69,10 @@ OPCIONES_HABLANTES = [
 
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
-# Cuántas transcripciones se ofrecen en las listas (las más recientes)
+# Cuántas transcripciones se ofrecen en las listas (las más recientes); «Ver más antiguas…» muestra las siguientes
 MAX_EN_LISTA = 15
+# Cuántos resultados de una búsqueda se ofrecen (más no se leen: conviene buscar con más palabras)
+MAX_RESULTADOS = 50
 
 # Quien usa el menú no maneja comandos: si falta el componente, se le dice qué hacer en simple
 FALTA_DIARIZACION = "Para identificar hablantes falta un componente. Vuelve a ejecutar el instalador."
@@ -83,6 +87,10 @@ MOSTRAR_EN_CARPETA = "Mostrar en su carpeta"
 
 class Atras(Exception):
     """Se eligió "← Volver" o se apretó Esc."""
+
+
+class CerrarPrograma(Exception):
+    """Algo (p. ej. una actualización terminada) pide cerrar el programa: sube hasta iniciar()."""
 
 
 VOLVER = "← Volver"
@@ -138,6 +146,11 @@ def ruta(mensaje: str, validar=None, solo_carpetas: bool = False, defecto: str =
                                        only_directories=solo_carpetas, qmark="?", style=ESTILO), volver)
 
 
+def clave_secreta(mensaje: str, volver: bool = True) -> str:
+    """Campo para pegar una clave: no muestra lo que se escribe."""
+    return _preguntar(questionary.password(_con_pista(mensaje, volver), qmark="?", style=ESTILO), volver)
+
+
 def _con_pista(mensaje: str, volver: bool) -> str:
     """En las preguntas para escribir no hay lista: avisamos de Esc en el propio mensaje."""
     if not volver:
@@ -175,21 +188,28 @@ def iniciar():
     consola.print("\n 🎙️  [bold]Transcriptor Pro[/]")
     consola.print(" [dim]↑ ↓ para moverte · Enter para elegir · Esc o ← Volver para regresar[/]\n")
 
+    _avisar_version_nueva()
+
     acciones = {
+        "preparar": flujo_preparar,
         "transcribir": flujo_transcribir,
         "nombres": flujo_nombres,
         "mis": flujo_mis_transcripciones,
         "configuracion": flujo_configuracion,
     }
     while True:
+        # Se recalcula en cada vuelta: al descargar lo que falta, la opción desaparece
+        opciones = [
+            ("Transcribir audio o video", "transcribir"),
+            ("Cambiar nombres de hablantes", "nombres"),
+            ("Mis transcripciones", "mis"),
+            ("Configuración", "configuracion"),
+            ("Salir", "salir"),
+        ]
+        if _necesita_preparacion():
+            opciones.insert(0, ("Preparar la app (falta descargar lo necesario)", "preparar"))
         try:
-            accion = elegir("¿Qué quieres hacer?", [
-                ("Transcribir audio o video", "transcribir"),
-                ("Cambiar nombres de hablantes", "nombres"),
-                ("Mis transcripciones", "mis"),
-                ("Configuración", "configuracion"),
-                ("Salir", "salir"),
-            ], volver=False)
+            accion = elegir("¿Qué quieres hacer?", opciones, volver=False)
         except (KeyboardInterrupt, EOFError):
             accion = "salir"
         if accion == "salir":
@@ -203,10 +223,31 @@ def iniciar():
         except (KeyboardInterrupt, EOFError):
             consola.print("\n[dim]Volviendo al menú.[/]")
             seguir = True
+        except CerrarPrograma:
+            seguir = False
         if seguir is False:
             consola.print("[dim]Hasta luego.[/]")
             return
         consola.print()
+
+
+def _necesita_preparacion() -> bool:
+    try:
+        return modelos.necesita_preparacion()
+    except Exception:
+        return False
+
+
+def _avisar_version_nueva():
+    """Busca versiones nuevas sin esperar y, si ya se sabe de una, lo dice en una línea. Nunca impide abrir el menú."""
+    try:
+        actualizar.buscar_en_segundo_plano()
+        novedad = actualizar.aviso_guardado()
+        if novedad:
+            consola.print(f" [dim]Hay una versión nueva ({escape(novedad.version)}). "
+                          "Puedes instalarla en Configuración › Buscar actualizaciones.[/]\n")
+    except Exception:
+        pass
 
 
 # --- Transcribir ------------------------------------------------------------
@@ -257,17 +298,23 @@ def flujo_transcribir():
 
     def empezar():
         while True:
+            falta_modelo = _falta_descargar(r["modelo"])
             consola.print(_resumen_transcribir(_entrada(r), r["modelo"], r["hablantes"], r["cuantos"],
-                                               r["idioma"], r["salida"], f"{r['fecha'].isoformat()} {r['titulo']}"))
+                                               r["idioma"], r["salida"], f"{r['fecha'].isoformat()} {r['titulo']}",
+                                               descarga=falta_modelo))
             decision = elegir("¿Empiezo?", [
                 ("Sí, empezar", "empezar"),
                 ("Más opciones… (modelo, idioma, carpeta)", "mas"),
                 ("Cancelar", "cancelar"),
             ])
-            if decision != "mas":
-                r["decision"] = decision
-                return
-            r["modelo"], r["idioma"], r["salida"] = _mas_opciones(r["modelo"], r["idioma"], r["salida"])
+            if decision == "mas":
+                r["modelo"], r["idioma"], r["salida"] = _mas_opciones(r["modelo"], r["idioma"], r["salida"])
+                continue
+            # Con «Sin internet» y algo sin descargar, transcribir fallaría: se ofrece descargarlo antes
+            if decision == "empezar" and not _resolver_faltantes_sin_internet(r["modelo"], r["hablantes"]):
+                continue
+            r["decision"] = decision
+            return
 
     seguir_pasos([entrada, hablantes, nombre, empezar])
     if r["decision"] == "cancelar":
@@ -338,7 +385,41 @@ def separar_fecha_y_titulo(escrito: str, fecha_propuesta: date) -> tuple:
     return fecha or fecha_propuesta, escrito or "Reunión"
 
 
-def _resumen_transcribir(entrada, modelo, hablantes, cuantos, idioma, salida, reunion=None) -> Text:
+def _falta_descargar(modelo: str) -> bool:
+    """True si el modelo de transcripción todavía no está en este computador (si no se sabe, False)."""
+    try:
+        return not modelos.descargado(modelo)
+    except Exception:
+        return False
+
+
+def _resolver_faltantes_sin_internet(modelo: str, hablantes: bool) -> bool:
+    """
+    Con «Sin internet» activo, si falta algún modelo ofrece descargarlo (se conecta solo durante la descarga).
+    Retorna True si se puede empezar; False si no se descargó (se vuelve a «¿Empiezo?»).
+    """
+    try:
+        if not ajustes.sin_internet_activo():
+            return True
+        faltan = []
+        if _falta_descargar(modelo):
+            faltan.append((modelo, f"el modelo {modelo}"))
+        if hablantes and plataforma.hablantes_disponible() and not modelos.descargado(modelos.HABLANTES):
+            faltan.append((modelos.HABLANTES, "el modelo para identificar hablantes"))
+    except Exception:
+        return True
+    if not faltan:
+        return True
+    que = " y ".join(texto_ for _, texto_ in faltan)
+    try:
+        elegir(f"Falta descargar {que} y está activado «Sin internet».", [("Descargarlo ahora", True)],
+               texto_volver="Volver")
+    except Atras:
+        return False
+    return all(_descargar_modelo(clave) for clave, _ in faltan)
+
+
+def _resumen_transcribir(entrada, modelo, hablantes, cuantos, idioma, salida, reunion=None, descarga=False) -> Text:
     nombre = entrada if es_url(entrada) else Path(entrada).name
     resumen = Text("\nVoy a transcribir ")
     resumen.append(nombre, style="bold")
@@ -358,6 +439,10 @@ def _resumen_transcribir(entrada, modelo, hablantes, cuantos, idioma, salida, re
         resumen.append(".")
     if salida:
         resumen.append(f" Lo guardo en {corta(salida)}.")
+    if descarga:
+        peso = modelos.PESO_APROXIMADO.get(modelo)
+        aprox = f" (≈ {modelos.texto_peso(peso)})" if peso else ""
+        resumen.append(f"\nLa primera vez descargo el modelo {modelo}{aprox}; puede tardar unos minutos.", style="yellow")
     return resumen
 
 
@@ -503,6 +588,8 @@ def flujo_configuracion():
             return True
         try:
             cambio = _cambiar_ajuste(opcion)
+        except CerrarPrograma:
+            return False
         except (Atras, KeyboardInterrupt, EOFError):
             consola.print()
             cambio = None
@@ -526,7 +613,32 @@ def _elegir_ajuste(mensaje: str, salida: Optional[Path]) -> str:
         (f"Sin internet: {'sí' if ajustes.valor('sin_internet') else 'no'}", "sin_internet"),
         (f"Reconocer voces: {'sí' if ajustes.valor('reconocer_voces') else 'no'}", "reconocer_voces"),
         *_entrada_voces_guardadas(),
+        *_entrada_clave(),
+        ("Modelos (descargar o eliminar)", "modelos"),
+        ("Preparar la app", "preparar"),
+        *_entrada_clic_derecho(),
+        (f"Buscar actualizaciones (tienes la versión {_version()})", "actualizaciones"),
     ])
+
+
+def _version() -> str:
+    try:
+        return actualizar.version_instalada()
+    except Exception:
+        return "?"
+
+
+def _entrada_clave() -> list:
+    """«Clave de Hugging Face: guardada/falta», solo si identificar hablantes funciona en este computador."""
+    if not plataforma.hablantes_disponible():
+        return []
+    return [(f"Clave de Hugging Face: {'guardada' if modelos.token_guardado() else 'falta'}", "clave_hf")]
+
+
+def _entrada_clic_derecho() -> list:
+    if not clic_derecho.disponible():
+        return []
+    return [(f"Transcribir con clic derecho: {'sí' if clic_derecho.instalado() else 'no'}", "clic_derecho")]
 
 
 def _entrada_voces_guardadas() -> list:
@@ -560,6 +672,23 @@ def _cambiar_ajuste(clave: str):
     """Pregunta el nuevo valor de un ajuste. Retorna None si no cambia."""
     if clave == "voces_guardadas":  # no es un ajuste con valor: es la lista de voces para olvidar
         return _gestionar_voces_guardadas()
+    # Tampoco son ajustes con valor: acciones. Siempre retornan None (no hay nada que guardar)
+    if clave == "clave_hf":
+        _configurar_clave()
+        return None
+    if clave == "modelos":
+        _gestionar_modelos()
+        return None
+    if clave == "preparar":
+        flujo_preparar()
+        return None
+    if clave == "clic_derecho":
+        _cambiar_clic_derecho()
+        return None
+    if clave == "actualizaciones":
+        if _buscar_actualizaciones():
+            raise CerrarPrograma
+        return None
     actual = ajustes.valor(clave)
     if clave == "idioma":
         return preguntar_idioma("Idioma por defecto del audio:", actual)
@@ -599,6 +728,249 @@ def _cambiar_ajuste(clave: str):
         return str(limpiar_ruta(elegida).resolve())
 
 
+# --- Modelos, clave y «Preparar la app» ---------------------------------------
+
+def _descargar_modelo(clave: str) -> bool:
+    """
+    Descarga un modelo con barra de avance. Retorna True si quedó descargado. Un fallo se explica en
+    simple (y el detalle se guarda) sin cerrar el programa; Ctrl+C sube y vuelve al menú.
+    """
+    nombre = "el modelo para identificar hablantes" if clave == modelos.HABLANTES else f"el modelo {clave}"
+    peso = modelos.PESO_APROXIMADO.get(clave)
+    consola.print(f"Descargando {nombre}" + (f" (≈ {modelos.texto_peso(peso)})" if peso else "") + "…")
+    if ajustes.sin_internet_activo():
+        consola.print("[dim]Tienes «Sin internet» activado: me conecto solo durante la descarga.[/]")
+    columnas = (SpinnerColumn(), TextColumn("Descargando…"), BarColumn(bar_width=None), DownloadColumn(),
+                TimeElapsedColumn())
+    try:
+        with Progress(*columnas, console=consola, transient=True) as progreso:
+            tarea = progreso.add_task("descarga", total=None)  # sin total: barra que se mueve, hasta que llegue el avance
+
+            def al_progresar(hecho, total):
+                progreso.update(tarea, completed=hecho, total=total or None)
+
+            modelos.descargar(clave, al_progresar)
+    except RuntimeError as e:
+        _avisar(str(e))
+        return False
+    except (KeyboardInterrupt, EOFError):
+        raise
+    except Exception as e:
+        cli._mostrar_error(e, detalle=False)
+        return False
+    consola.print(f"[green]✓[/] Descargué {nombre}.")
+    return True
+
+
+def _abrir_pagina(url: str):
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        consola.print(f"Ábrela en tu navegador: [cyan]{url}[/]")
+
+
+def _configurar_clave() -> bool:
+    """Explica para qué sirve la clave de Hugging Face y la pide. Retorna True si quedó guardada."""
+    consola.print(
+        "\nLa clave sirve para identificar quién habla en cada audio. Es gratis y se guarda solo en este computador.\n"
+        "Pasos: 1) crea una cuenta gratis en Hugging Face y una clave de tipo «lectura»; "
+        "2) abre la página del modelo y acepta sus condiciones.\n")
+    while True:
+        opcion = elegir("¿Qué hago?", [("Abrir las dos páginas", "paginas"), ("Pegar la clave", "pegar")])
+        if opcion == "paginas":
+            _abrir_pagina(modelos.PAGINA_TOKENS)
+            _abrir_pagina(modelos.PAGINA_MODELO)
+            continue
+        try:
+            token = clave_secreta("Pega la clave aquí:").strip()
+        except Atras:
+            continue
+        if not token:
+            continue
+        if any(c.isspace() for c in token):
+            _avisar("La clave no debe tener espacios. Revisa que la copiaste completa.")
+            continue
+        with consola.status("Comprobando…"):
+            resultado = modelos.comprobar_token(token)
+        if resultado == "ok":
+            if _guardar_clave(token):
+                consola.print("[green]✓[/] La clave funciona. La guardé solo en este computador.")
+                return True
+        elif resultado == "invalida":
+            _avisar("Esa clave no sirve. Revisa que la copiaste completa.")
+        elif resultado == "sin_acceso":
+            _avisar("La clave sirve, pero falta aceptar las condiciones del modelo. "
+                    "Abre su página, acepta y vuelve a intentarlo.")
+            try:
+                if elegir("¿Abro la página del modelo?", [("Abrir la página", True)], texto_volver="Ahora no"):
+                    _abrir_pagina(modelos.PAGINA_MODELO)
+            except Atras:
+                pass
+        else:  # sin_internet o desconocido
+            try:
+                guardar = si_no("No pude comprobarla (¿hay internet?). ¿La guardo igual?", defecto=False)
+            except Atras:
+                guardar = False
+            if guardar and _guardar_clave(token):
+                consola.print("[green]✓[/] Guardé la clave solo en este computador.")
+                return True
+
+
+def _guardar_clave(token: str) -> bool:
+    try:
+        modelos.guardar_token(token)
+        return True
+    except ValueError:
+        _avisar("La clave está vacía o tiene espacios. Revisa que la copiaste completa.")
+    except OSError:
+        _avisar("No pude guardar la clave en este computador.")
+    return False
+
+
+def _etiqueta_modelo(m, ancho: int, usado: str) -> str:
+    if m.descargado:
+        texto_ = f"{m.nombre.ljust(ancho)} · descargado"
+        if m.bytes:
+            texto_ += f" · {modelos.texto_peso(m.bytes)}"
+        if m.clave == usado:
+            texto_ += " · el que usas"
+        return texto_
+    peso = modelos.PESO_APROXIMADO.get(m.clave)
+    return f"{m.nombre.ljust(ancho)} · sin descargar" + (f" (≈ {modelos.texto_peso(peso)})" if peso else "")
+
+
+def _gestionar_modelos():
+    """Lista de modelos con su estado; elegir uno permite descargarlo o eliminarlo. Esc vuelve a Configuración."""
+    while True:
+        lista = modelos.estado()
+        usado = ajustes.valor("modelo")
+        ancho = max((len(m.nombre) for m in lista), default=0)
+        clave = elegir("Modelos (se guardan en este computador). ¿Cuál?",
+                       [(_etiqueta_modelo(m, ancho, usado), m.clave) for m in lista])
+        m = next(m for m in lista if m.clave == clave)
+        try:
+            if not m.descargado:
+                _descargar_desde_lista(m)
+            else:
+                _eliminar_desde_lista(m, usado)
+        except Atras:
+            continue
+
+
+def _descargar_desde_lista(m):
+    peso = modelos.PESO_APROXIMADO.get(m.clave)
+    elegir(f"{m.nombre}", [(f"Descargar (≈ {modelos.texto_peso(peso)})" if peso else "Descargar", True)])
+    if m.clave == modelos.HABLANTES and not modelos.token_guardado():
+        elegir("Para este modelo hace falta la clave gratuita de Hugging Face.", [("Configurar la clave ahora", True)])
+        if not _configurar_clave():
+            return
+    _descargar_modelo(m.clave)
+
+
+def _eliminar_desde_lista(m, usado: str):
+    liberado = modelos.texto_peso(m.bytes) if m.bytes else "espacio"
+    elegir(f"{m.nombre}", [(f"Eliminar (libera {liberado})", True)])
+    aviso_ = ""
+    if m.clave == usado:
+        aviso_ = " Es el que usas: se volverá a descargar al transcribir."
+    if not si_no(f"¿Elimino {m.nombre}?{aviso_}", defecto=False):
+        return
+    try:
+        modelos.eliminar(m.clave)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"No se pudo eliminar el modelo {m.clave}: {e}")
+        _avisar("No pude eliminar el modelo.")
+        return
+    consola.print(f"[green]✓[/] Eliminé {m.nombre} (liberé {liberado}).")
+
+
+def flujo_preparar():
+    """Deja la app lista: clave de hablantes (si hace falta) y los modelos que faltan por descargar."""
+    quedo = []
+    hablantes = plataforma.hablantes_disponible() and _instalado("pyannote.audio")
+    if hablantes and not modelos.token_guardado():
+        consola.print("\nPara identificar quién habla hace falta una clave gratuita de Hugging Face.")
+        try:
+            try:
+                elegir("¿Qué hago?", [("Configurarla ahora", True)],
+                       texto_volver="Ahora no (transcribir sin identificar hablantes)")
+            except Atras:
+                historial.guardar_preferencias(**{modelos.SIN_CLAVE_ELEGIDO: True})
+                raise
+            _configurar_clave()
+        except Atras:
+            pass  # «Ahora no», o Esc dentro de la clave: se sigue con lo demás
+    modelo = ajustes.valor("modelo")
+    if _falta_descargar(modelo) and not _descargar_modelo(modelo):
+        quedo.append(f"el modelo {modelo}")
+    if hablantes and modelos.token_guardado() and not modelos.descargado(modelos.HABLANTES):
+        if not _descargar_modelo(modelos.HABLANTES):
+            quedo.append("el modelo para identificar hablantes")
+    if hablantes and not modelos.token_guardado():
+        quedo.append("la clave para identificar hablantes")
+    if quedo:
+        consola.print(f"Falta: {', '.join(quedo)}. Puedes terminarlo en Configuración.")
+    else:
+        consola.print("[green]✓[/] Todo listo para transcribir.")
+    return True
+
+
+def _cambiar_clic_derecho():
+    activo = clic_derecho.instalado()
+    try:
+        quiere = elegir("¿Transcribir con clic derecho?", [
+            ("Sí: aparece «Transcribir con Transcriptor» al hacer clic derecho en un audio o video", True),
+            ("No: quitarlo", False),
+        ], activo)
+    except Atras:
+        return
+    if quiere == activo:
+        return
+    if (clic_derecho.instalar() if quiere else clic_derecho.quitar()):
+        consola.print("[green]✓[/] Listo." if not quiere else f"[green]✓[/] Listo. {escape(clic_derecho.TEXTO_DONDE)}")
+    else:
+        _avisar("No pude activarlo en este computador." if quiere else "No pude quitarlo en este computador.")
+
+
+def _buscar_actualizaciones() -> bool:
+    """Busca una versión nueva y ofrece instalarla. Retorna True si hay que cerrar el programa."""
+    version = _version()
+    try:
+        with consola.status("Buscando…"):
+            novedad = actualizar.buscar()
+    except actualizar.SinConexion:
+        _avisar("No pude revisar: no hay conexión a internet.")
+        return False
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"No se pudo buscar actualizaciones: {e}")
+        _avisar("No pude revisar si hay una versión nueva.")
+        return False
+    if novedad is None:
+        consola.print(f"[green]✓[/] Tienes la última versión ({escape(version)}).")
+        return False
+    consola.print(f"Hay una versión nueva: {escape(novedad.version)} (tienes {escape(version)}).")
+    try:
+        elegir("¿Qué hago?", [("Actualizar ahora", True)], texto_volver="Ahora no")
+    except Atras:
+        return False
+    if actualizar.como_se_instalo() != "uv_tool":
+        _avisar(actualizar.MENSAJE_OTRA_INSTALACION)
+        return False
+    if not actualizar.buscar_uv():
+        _avisar(actualizar.MENSAJE_SIN_UV)
+        return False
+    resultado = actualizar.actualizar(novedad, salida=consola.print)
+    if resultado == "listo":
+        consola.print("[green]✓[/] Actualizado. Abre Transcriptor de nuevo para usar la nueva versión.")
+        return True
+    if resultado == "reiniciar_aparte":
+        consola.print("Se abrió una ventana que termina la actualización. Transcriptor se cerrará ahora.")
+        return True
+    _avisar("No se pudo actualizar. Inténtalo más tarde o vuelve a ejecutar el instalador.")
+    return False
+
+
 def _avisar_si_falta(clave: str, valor):
     if clave == "modo_hablantes" and valor != ajustes.NUNCA and not _instalado("pyannote.audio"):
         consola.print(f"[yellow]{escape(_falta_diarizacion())}[/]")
@@ -635,19 +1007,88 @@ def corta(carpeta: Path) -> str:
 # --- Mis transcripciones ----------------------------------------------------
 
 def flujo_mis_transcripciones():
-    entradas = historial.listar()[:MAX_EN_LISTA]
-    if not entradas:
+    todas = historial.listar()
+    if not todas:
         consola.print("[dim]Todavía no hay transcripciones en tu historial. "
                       "Las que hagas a partir de ahora aparecerán aquí.[/]")
         return True
+    pagina = 0
     while True:
-        eleccion = elegir("¿Cuál?", [(t, i) for i, t in enumerate(etiquetas(entradas))])
+        inicio = pagina * MAX_EN_LISTA
+        entradas = todas[inicio:inicio + MAX_EN_LISTA]
+        opciones = [("Buscar en todas…", "buscar")]
+        if pagina > 0:
+            opciones.append(("Ver más recientes…", "recientes"))
+        opciones += [(t, i) for i, t in enumerate(etiquetas(entradas))]
+        if inicio + MAX_EN_LISTA < len(todas):
+            opciones.append(("Ver más antiguas…", "antiguas"))
+        eleccion = elegir("¿Cuál?", opciones)
+        if eleccion == "buscar":
+            try:
+                _buscar_en_todas()
+            except Atras:
+                pass
+            continue
+        if eleccion == "recientes":
+            pagina -= 1
+            continue
+        if eleccion == "antiguas":
+            pagina += 1
+            continue
         entrada = entradas[eleccion]
         try:
             return acciones_sobre(entrada["txt"], entrada["json"], f"¿Qué hago con {_nombre(entrada['txt'])}?",
                                   volver=True)
         except Atras:
             continue  # de vuelta a la lista
+
+
+def _buscar_en_todas():
+    """Pregunta qué buscar y muestra los párrafos que lo contienen. Esc en la pregunta vuelve a la lista."""
+    while True:
+        consulta = texto("¿Qué busco? (una o varias palabras)").strip()
+        if not consulta:
+            continue
+        with consola.status("Buscando…"):
+            resultados = buscar.buscar(consulta)
+        if not resultados:
+            consola.print(f"No encontré «{escape(consulta)}» en tus transcripciones.")
+            continue
+        _elegir_resultado(resultados)
+
+
+def _elegir_resultado(resultados: list):
+    """Lista de resultados: elegir uno abre la lectura en ese momento y vuelve a la lista. Esc vuelve a la pregunta."""
+    if len(resultados) > MAX_RESULTADOS:
+        consola.print(f"[dim]Muestro las primeras {MAX_RESULTADOS}: prueba con más palabras.[/]")
+    mostrados = resultados[:MAX_RESULTADOS]
+    while True:
+        try:
+            eleccion = elegir("¿Cuál abro?", [(buscar.etiqueta(c), i) for i, c in enumerate(mostrados)])
+        except Atras:
+            return
+        c = mostrados[eleccion]
+        leer_con_audio(c.txt, c.json, c.audio, ir_a=c.inicio)
+
+
+def leer_con_audio(txt: Path, json_path: Optional[Path], audio: Optional[Path] = None, ir_a: Optional[float] = None) -> bool:
+    """Crea la vista de lectura (texto + audio) y la abre en el navegador. Retorna True si se pudo abrir."""
+    try:
+        ruta_vista = vista.crear_vista(txt, json_path, audio, ir_a=ir_a)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"No se pudo crear la vista: {e}")
+        _avisar("No pude preparar la lectura de esta transcripción.")
+        return False
+    try:
+        if vista.datos_de_vista(txt, json_path, audio)["audio"] is None:
+            consola.print("[yellow]No encuentro el audio: se verá sin audio.[/]")
+    except Exception:
+        pass
+    if vista.abrir_en_navegador(ruta_vista):
+        consola.print("[green]✓[/] La abrí en el navegador. Haz clic en un párrafo para escucharlo.")
+        return True
+    _avisar(f"No pude abrir la vista. Está guardada en {corta(ruta_vista)}.")
+    return False
 
 
 def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: bool = False):
@@ -657,9 +1098,13 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
     Con volver, ofrece "← Volver" (lanza Atras, para regresar a la lista de donde se eligió).
     """
     while True:
-        opciones = [("Abrir la transcripción", "abrir"), ("Copiar la transcripción", "copiar")]
+        opciones = [("Abrir la transcripción", "abrir"), ("Leer con el audio", "leer"),
+                    ("Copiar la transcripción", "copiar")]
         if json_path:
             opciones.append(("Cambiar nombres de hablantes", "nombres"))
+            dudosas_n = cli._contar_dudosas(json_path)
+            if dudosas_n:
+                opciones.append((f"Revisar frases dudosas ({dudosas_n})", "dudosas"))
         opciones += [
             (MOSTRAR_EN_CARPETA, "carpeta"),
             ("Volver al menú", "menu"),
@@ -676,6 +1121,10 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
         try:
             if opcion == "abrir":
                 abrir(txt)
+            elif opcion == "leer":
+                leer_con_audio(txt, json_path)
+            elif opcion == "dudosas":
+                cli._revisar_dudosas(json_path, sys.modules[__name__])
             elif opcion == "copiar":
                 copiar_transcripcion(txt)
             elif opcion == "carpeta":

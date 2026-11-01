@@ -55,3 +55,17 @@ def como_en_mac_con_chip_apple(monkeypatch):
 
     monkeypatch.setattr(plataforma, "es_mac_con_chip_apple", lambda: True)
     monkeypatch.setattr(plataforma, "hablantes_disponible", lambda: True)
+
+
+@pytest.fixture
+def sin_red_ni_modelos_en_el_menu(monkeypatch):
+    """
+    El menú consulta modelos descargados y versiones nuevas: en los tests nada sale a la red ni mira la
+    caché real (los archivos de test del menú lo piden con pytestmark). Por defecto todo está descargado y no hay versión nueva; cada test lo cambia si lo necesita.
+    """
+    from src import actualizar, modelos
+
+    monkeypatch.setattr(modelos, "descargado", lambda clave: True)
+    monkeypatch.setattr(modelos, "necesita_preparacion", lambda: False)
+    monkeypatch.setattr(actualizar, "buscar_en_segundo_plano", lambda dias=7: None)
+    monkeypatch.setattr(actualizar, "aviso_guardado", lambda: None)

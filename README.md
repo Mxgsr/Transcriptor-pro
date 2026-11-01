@@ -2,7 +2,7 @@
 
 Convierte en texto un audio, un video o un enlace de YouTube. Puede reconocer quién habla en cada momento.
 
-> **Versión de prueba (beta).** Esta es la versión 2.0.0b1 ("V2-beta1"). Los instaladores de abajo instalan siempre la versión estable (la de la rama `main`), así que **no** instalan la beta. Para probar la beta, mira más abajo la sección «Probar la versión beta».
+> **Versión de prueba (beta).** Esta es la versión 2.0.0b2 ("V2-beta2"). Los instaladores de abajo instalan siempre la versión estable (la de la rama `main`), así que **no** instalan la beta. Para probar la beta, mira más abajo la sección «Probar la versión beta».
 
 ## 🛠️ Instalación paso a paso
 
@@ -49,7 +49,7 @@ Primero haz la instalación normal de arriba (así queda instalado `uv`, el prog
 uv tool install --force --reinstall-package transcriptor-pro --python 3.11 "transcriptor-pro[diarizacion] @ https://github.com/Mxgsr/Transcriptor-pro/archive/refs/heads/v2.zip"
 ```
 
-Tus transcripciones, tu configuración y tu token se conservan. Para volver a la versión estable, pega otra vez la línea de instalación normal. Si tienes dudas, pídele a Max el comando.
+Tus transcripciones, tu configuración y tu token se conservan. Desde esta versión, **Configuración › Buscar actualizaciones** sirve para pasar a las versiones nuevas sin pegar esta línea otra vez (si tienes la beta 1, que aún no lo tiene, pega la línea una vez más). Para volver a la versión estable, pega otra vez la línea de instalación normal. Si tienes dudas, pídele a Max el comando.
 
 ## 🗣️ Reconocer quién habla (opcional)
 
@@ -67,8 +67,8 @@ Escribe `transcriptor` y se abre un menú. Te mueves con las flechas ↑ ↓ y e
 Desde el menú puedes:
 - Transcribir un archivo o un enlace de YouTube.
 - Cambiar los nombres de los hablantes.
-- Ver tus últimas transcripciones.
-- Cambiar la configuración (idioma, modelo, carpetas…).
+- Ver tus transcripciones, leerlas con el audio y buscar en todas.
+- Cambiar la configuración (idioma, modelo, carpetas, clave, actualizaciones…).
 
 ### Transcribir, en 3 pasos
 
@@ -90,6 +90,10 @@ Después de identificar a los hablantes, el programa te ofrece escucharlos uno p
 
 También puedes hacerlo después con **Cambiar nombres de hablantes**.
 
+### Revisar frases dudosas
+
+Al identificar hablantes, el programa marca las frases en las que dudó de quién habla. Después de ponerles nombre (y en **¿Y ahora?**) aparece **Revisar frases dudosas (N)**: te muestra la frase con la anterior y la siguiente, y eliges **Escuchar**, **Es de…** otra persona, **Está bien** o **Terminar la revisión**. Al mover una frase, la transcripción se rehace sola. Es opcional.
+
 ### Reconocer voces
 
 Cuando le pones nombre a alguien, el programa guarda su "huella de voz" **solo en tu computador** (en `~/.transcriptor/voces.json`; no se envía a ningún lado). La próxima vez te propone "Es Ana" y tú lo confirmas: nunca pone un nombre solo. En **Configuración** puedes apagar esta función, ver las voces guardadas y olvidar una o todas.
@@ -97,6 +101,22 @@ Cuando le pones nombre a alguien, el programa guarda su "huella de voz" **solo e
 ### Copiar la transcripción
 
 En **¿Y ahora?** (al terminar) y en **Mis transcripciones** está **Copiar la transcripción**. Copia el texto con su encabezado, listo para pegarlo en Claude y pedirle la minuta.
+
+### Leer con el audio
+
+En **¿Y ahora?** y en **Mis transcripciones** está **Leer con el audio**: abre en tu navegador una página con la transcripción, un color por hablante y un reproductor. Haz clic en un párrafo y suena desde ahí; el párrafo que suena se resalta. Arriba hay un buscador que resalta y cuenta las coincidencias. La página se guarda en `~/.transcriptor/vistas/` (no ensucia la carpeta de la reunión) y funciona sin internet. Si el audio ya no está, se lee igual, sin reproductor.
+
+### Buscar en todas
+
+En **Mis transcripciones**, **Buscar en todas…** busca una palabra o frase en todas tus transcripciones, sin importar mayúsculas ni tildes. Cada resultado dice la reunión, el minuto, quién lo dijo y un trozo de la frase; al elegirlo se abre la lectura en ese momento. La lista muestra las más recientes y **Ver más antiguas…** muestra el resto.
+
+### Configuración
+
+- **Clave de Hugging Face:** te guía paso a paso, abre las páginas necesarias, comprueba la clave que pegues y la guarda.
+- **Modelos:** muestra qué modelos están en tu computador y cuánto pesan, y deja **Descargar** o **Eliminar** cada uno.
+- **Preparar la app:** deja lista la clave y descarga el modelo por defecto y el de hablantes. Aparece en el menú principal mientras falte algo.
+- **Transcribir con clic derecho:** agrega «Transcribir con Transcriptor» al clic derecho de un audio o video. Transcribe con tu configuración, sin preguntas, uno tras otro si son varios, y avisa al terminar cada uno.
+- **Buscar actualizaciones:** compara tu versión con la última y, si hay una nueva, **Actualizar ahora** la instala sin volver a pegar la línea del instalador. Si el programa está abierto y tu computador no permite reemplazarlo, se abre una ventana aparte que actualiza cuando lo cierras.
 
 ### Mientras trabaja
 
@@ -110,7 +130,7 @@ Verás un mensaje simple (por ejemplo, que falta tu clave de Hugging Face, que n
 
 ## 🔒 Privacidad e internet
 
-El audio y el texto nunca salen de tu computador: todo se procesa ahí. Internet solo se usa para instalar, para descargar cada modelo la primera vez, para bajar videos de YouTube y para revisar si hay versiones nuevas de los modelos. Para que no se conecte ni siquiera para eso, activa **Sin internet** en Configuración (necesitas tener ya descargados los modelos que uses).
+El audio y el texto nunca salen de tu computador: todo se procesa ahí. Internet solo se usa para instalar, para descargar cada modelo la primera vez, para bajar videos de YouTube, para revisar si hay versiones nuevas de los modelos y para buscar actualizaciones del programa (solo cuando tú lo pides o, como aviso discreto, una vez por semana). Para que no se conecte ni siquiera para eso, activa **Sin internet** en Configuración (necesitas tener ya descargados los modelos que uses).
 
 ## ✅ Qué funciona en cada computador
 
@@ -131,7 +151,7 @@ Con los comandos el archivo se llama como el audio (`mi_audio.blocks.txt`) y no 
 
 `transcriptor --help` muestra todas las opciones de cada comando.
 
-La configuración (por ejemplo el token `HF_TOKEN`) se guarda en la carpeta `.transcriptor` dentro de tu carpeta de usuario (`~/.transcriptor/.env`). En esa misma carpeta quedan tu historial, las personas que has nombrado, las voces guardadas y los detalles de los errores.
+La configuración (por ejemplo el token `HF_TOKEN`) se guarda en la carpeta `.transcriptor` dentro de tu carpeta de usuario (`~/.transcriptor/.env`). En esa misma carpeta quedan tu historial, las personas que has nombrado, las voces guardadas, las páginas de lectura (`vistas/`) y los detalles de los errores.
 
 ## 👩‍💻 Para trabajar en el código
 

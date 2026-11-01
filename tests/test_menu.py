@@ -11,6 +11,8 @@ import typer
 
 from src import ajustes, cli, historial, menu
 
+pytestmark = pytest.mark.usefixtures("sin_red_ni_modelos_en_el_menu")
+
 
 class Guion:
     """
@@ -43,7 +45,7 @@ class Guion:
             raise menu.Atras
         return respuesta
 
-    def _elegir(self, mensaje, opciones, defecto=None, volver=True):
+    def _elegir(self, mensaje, opciones, defecto=None, volver=True, texto_volver=None):
         valores = [o[1] if isinstance(o, tuple) else o for o in opciones]
         self.hechas.append((mensaje, opciones, defecto))
         respuesta = self._siguiente(mensaje, volver)
@@ -977,5 +979,5 @@ def test_acciones_ofrece_copiar_despues_de_abrir(guion, instalado, con_historial
     assert menu.flujo_mis_transcripciones() is False
 
     etiquetas_ = [o[0] for o in guion.opciones_de("¿Qué hago con")]
-    assert etiquetas_[:2] == ["Abrir la transcripción", "Copiar la transcripción"]
+    assert etiquetas_[:3] == ["Abrir la transcripción", "Leer con el audio", "Copiar la transcripción"]
     copiar.assert_called_once()

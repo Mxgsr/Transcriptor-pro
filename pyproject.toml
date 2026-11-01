@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "transcriptor-pro"
-version = "2.0.0b1"
+version = "2.0.0b2"
 description = "Transcribe audio y video (YouTube o archivos locales) con Whisper, en Mac y Windows."
 readme = "README.md"
 requires-python = ">=3.10"

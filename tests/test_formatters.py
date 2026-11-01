@@ -146,3 +146,31 @@ def test_encabezado_sin_participantes_omite_la_linea():
     assert encabezado_de_transcripcion("Mi reunión", date(2026, 10, 30), 3900, [{"text": "Hola"}]) == (
         "# Mi reunión\nFecha: 30 de octubre de 2026\nDuración: 1 h 05 min\n\n"
     )
+
+
+def test_leer_parrafos_del_txt_con_y_sin_encabezado(tmp_path):
+    from datetime import date
+    from utils.formatters import encabezado_de_transcripcion, guardar_txt_con_timestamps, leer_parrafos_del_txt
+
+    txt = tmp_path / "r.blocks.txt"
+    encabezado = encabezado_de_transcripcion("Plan", date(2026, 11, 1), 65, [{"speaker": "Ana"}])
+    guardar_txt_con_timestamps([{"start": 0, "text": "hola", "speaker": "Ana"}, {"start": 3725, "text": "chao"}],
+                               txt, encabezado)
+    cabecera, parrafos = leer_parrafos_del_txt(txt)
+    assert cabecera == {"titulo": "Plan", "fecha": "1 de noviembre de 2026", "duracion": "1 min 05 s",
+                        "participantes": "Ana"}
+    assert parrafos == [{"start": 0.0, "text": "Ana: hola"}, {"start": 3725.0, "text": "chao"}]
+
+    guardar_txt_con_timestamps([{"start": 5, "text": "hola"}], txt)
+    assert leer_parrafos_del_txt(txt) == ({}, [{"start": 5.0, "text": "hola"}])
+
+
+def test_leer_parrafos_del_txt_con_bom(tmp_path):
+    # Un .txt vuelto a guardar con el Bloc de notas puede empezar con BOM: no debe perderse la primera línea
+    from utils.formatters import leer_parrafos_del_txt
+
+    txt = tmp_path / "r.blocks.txt"
+    txt.write_bytes("[00:00:05] hola\n\n[00:00:09] chao".encode("utf-8-sig"))
+    assert leer_parrafos_del_txt(txt) == ({}, [{"start": 5.0, "text": "hola"}, {"start": 9.0, "text": "chao"}])
+    txt.write_bytes("# Plan\n\n[00:00:05] hola".encode("utf-8-sig"))
+    assert leer_parrafos_del_txt(txt) == ({"titulo": "Plan"}, [{"start": 5.0, "text": "hola"}])

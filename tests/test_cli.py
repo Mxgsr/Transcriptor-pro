@@ -12,6 +12,8 @@ from src.cli import app, _duracion, _texto_hablantes
 
 runner = CliRunner()
 
+pytestmark = pytest.mark.usefixtures("sin_red_ni_modelos_en_el_menu")
+
 
 @pytest.fixture(autouse=True)
 def restaurar_logging():
@@ -225,7 +227,7 @@ def _transcripcion_diarizada(tmp_path):
     json_path = tmp_path / "charla.blocks.json"
     guardar_json([
         {"start": 0, "end": 30, "text": "Bienvenidos al programa.", "speaker": "Hablante 1"},
-        {"start": 30, "end": 35, "text": "Gracias por invitarme.", "speaker": "Hablante 2"},
+        {"start": 30, "end": 35, "text": "Gracias por invitarme a este programa.", "speaker": "Hablante 2"},
         {"start": 35, "end": 40, "text": "Un placer.", "speaker": "Hablante 1"},
     ], json_path, audio=audio)
     return audio, json_path
@@ -304,7 +306,7 @@ def test_al_terminar_ofrece_escuchar_y_nombrar(monkeypatch, tmp_path, escucha, p
     assert primera[1] == [SI_NOMBRES] and primera[2] == "Ahora no"
     assert escucha["recortes"] == [(0, 10), (35, 5), (30, 5)]
     assert (tmp_path / "charla.blocks.txt").read_text(encoding="utf-8") == (
-        "[00:00:00] Ana: Bienvenidos al programa.\n\n[00:00:30] Luis: Gracias por invitarme."
+        "[00:00:00] Ana: Bienvenidos al programa.\n\n[00:00:30] Luis: Gracias por invitarme a este programa."
         "\n\n[00:00:35] Ana: Un placer."
     )
     assert "Ana (88 %), Luis (12 %)" in resultado.output
@@ -775,3 +777,208 @@ def test_no_se_propone_un_nombre_ya_dado_a_otro_hablante(escucha, preguntas):
 
     assert "Es Ana" not in preguntas.hechas[-1][1]
     assert "Es la misma persona que…" in preguntas.hechas[-1][1]
+
+
+# --- Revisar frases dudosas ------------------------------------------------------
+
+def _con_dudosas(tmp_path, con_audio=True):
+    """Una charla con dos frases dudosas (en el párrafo de Luis y en el de la tercera persona)."""
+    from utils.formatters import guardar_json
+
+    audio = tmp_path / "debate.mp3"
+    if con_audio:
+        audio.write_bytes(b"")
+    json_path = tmp_path / "debate.blocks.json"
+    guardar_json([
+        {"start": 0, "end": 10, "text": "Bienvenidos a todos.", "speaker": "Hablante 1"},
+        {"start": 10, "end": 20, "text": "Gracias por venir. Sí claro.", "speaker": "Hablante 2",
+         "dudosas": [{"text": "Sí claro.", "start": 15, "end": 20, "otro": "Hablante 1", "motivo": "borde"}]},
+        {"start": 20, "end": 30, "text": "Empecemos con el orden del día de hoy.", "speaker": "Hablante 1"},
+        {"start": 30, "end": 40, "text": "Yo opino distinto sobre el tema. Eso sí.", "speaker": "Hablante 3",
+         "dudosas": [{"text": "Eso sí.", "start": 36, "end": 40, "otro": "Hablante 2", "motivo": "borde"}]},
+    ], json_path, audio=audio if con_audio else None, nombres={"Hablante 1": "Ana", "Hablante 2": "Luis"})
+    return json_path
+
+
+def _revisar(json_path):
+    from src import cli, menu
+    return cli._revisar_dudosas(json_path, menu)
+
+
+def _parrafos_guardados(json_path):
+    from utils.formatters import cargar_transcripcion
+    return cargar_transcripcion(json_path)["parrafos"]
+
+
+def test_revisar_mover_la_frase_a_la_otra_persona(escucha, preguntas, tmp_path, capsys):
+    json_path = _con_dudosas(tmp_path)
+    preguntas.poner("Es de Ana", "Terminar la revisión")
+
+    assert _revisar(json_path) == 1
+
+    mensaje, opciones, texto_volver, _ = preguntas.hechas[0]
+    assert opciones == ["Escuchar", "Es de Ana", "Está bien (es de Luis)", "Es de otra persona…"]
+    assert texto_volver == "Terminar la revisión"
+    salida = capsys.readouterr().out
+    assert "Frase 1 de 2" in salida and "Corregí 1 frase." in salida
+    parrafos = _parrafos_guardados(json_path)
+    assert (parrafos[1]["speaker"], parrafos[1]["text"]) == ("Hablante 2", "Gracias por venir.")
+    assert parrafos[2]["speaker"] == "Hablante 1" and parrafos[2]["text"].startswith("Sí claro.")
+    # El .txt se rehizo con los nombres
+    assert "Luis: Gracias por venir." in (tmp_path / "debate.blocks.txt").read_text(encoding="utf-8")
+
+
+def test_revisar_muestra_el_contexto_y_cuenta_las_frases(escucha, preguntas, tmp_path, capsys):
+    json_path = _con_dudosas(tmp_path)
+    preguntas.poner("Es de Ana", "Terminar la revisión")
+
+    _revisar(json_path)
+
+    salida = capsys.readouterr().out
+    # Al mover una frase se vuelve a calcular la lista: lo que quedó corto entre dos párrafos de Ana también se propone
+    assert "Frase 1 de 2" in salida and "Frase 2 de 2" in salida
+    assert "Ana: Bienvenidos a todos." in salida                     # párrafo anterior
+    assert "Luis: Gracias por venir. Sí claro." in salida            # párrafo de la frase
+    assert "Ana: Empecemos con el orden del día de hoy." in salida   # párrafo siguiente
+
+
+def test_revisar_esta_bien_guarda_y_no_se_vuelve_a_proponer(escucha, preguntas, tmp_path, capsys):
+    from src import dudosas
+    json_path = _con_dudosas(tmp_path)
+    preguntas.poner("Está bien (es de Luis)", "Está bien (es de Hablante 3)")
+
+    assert _revisar(json_path) == 0
+
+    assert "Revisión guardada." in capsys.readouterr().out
+    assert dudosas.buscar_dudosas(_parrafos_guardados(json_path)) == []
+
+
+def test_revisar_es_de_otra_persona(escucha, preguntas, tmp_path):
+    json_path = _con_dudosas(tmp_path)
+    preguntas.poner("Es de otra persona…", "Hablante 3", "Terminar la revisión")
+
+    assert _revisar(json_path) == 1
+
+    # Solo se ofrecen los demás hablantes (no el actual ni el otro)
+    assert preguntas.hechas[1][0] == "¿De quién es?" and preguntas.hechas[1][1] == ["Hablante 3"]
+    parrafos = _parrafos_guardados(json_path)
+    assert any(p["speaker"] == "Hablante 3" and p["text"].startswith("Sí claro.") for p in parrafos)
+
+
+def test_revisar_esc_en_otra_persona_vuelve_a_la_misma_frase(escucha, preguntas, tmp_path):
+    json_path = _con_dudosas(tmp_path)
+    preguntas.poner("Es de otra persona…", "ESC", "Terminar la revisión")
+
+    assert _revisar(json_path) == 0
+    assert [h[0] for h in preguntas.hechas] == ["¿De quién es la frase marcada?", "¿De quién es?",
+                                                 "¿De quién es la frase marcada?"]
+
+
+def test_revisar_terminar_o_esc_guardan_lo_hecho(escucha, preguntas, tmp_path):
+    for final in ("Terminar la revisión", "ESC"):
+        json_path = _con_dudosas(tmp_path)
+        preguntas.poner("Es de Ana", final)
+
+        assert _revisar(json_path) == 1
+        assert _parrafos_guardados(json_path)[1]["text"] == "Gracias por venir."
+
+
+def test_revisar_terminar_sin_cambios_no_toca_el_archivo(escucha, preguntas, tmp_path):
+    json_path = _con_dudosas(tmp_path)
+    antes = json_path.read_bytes()
+    preguntas.poner("Terminar la revisión")
+
+    assert _revisar(json_path) == 0
+    assert json_path.read_bytes() == antes
+
+
+def test_revisar_ctrl_c_guarda_lo_hecho(escucha, preguntas, tmp_path, monkeypatch):
+    from src import menu
+    json_path = _con_dudosas(tmp_path)
+    preguntas.poner("Es de Ana")
+    original = menu.elegir
+
+    def con_ctrl_c(*args, **kwargs):
+        if preguntas.cola:
+            return original(*args, **kwargs)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(menu, "elegir", con_ctrl_c)
+
+    assert _revisar(json_path) == 1
+    assert _parrafos_guardados(json_path)[1]["text"] == "Gracias por venir."
+
+
+def test_revisar_escuchar_reproduce_la_frase_y_vuelve_a_preguntar(escucha, preguntas, tmp_path):
+    json_path = _con_dudosas(tmp_path)
+    preguntas.poner("Escuchar", "Está bien (es de Luis)", "Terminar la revisión")
+
+    _revisar(json_path)
+
+    assert escucha["recortes"] == [(14.5, 6.0)]  # desde medio segundo antes hasta medio segundo después
+    assert len(escucha["reproducidos"]) == 1
+    # Después de escuchar pregunta lo mismo de nuevo
+    assert preguntas.hechas[1][1] == preguntas.hechas[0][1]
+
+
+def test_revisar_sin_audio_no_ofrece_escuchar(escucha, preguntas, tmp_path):
+    json_path = _con_dudosas(tmp_path, con_audio=False)
+    preguntas.poner("Terminar la revisión")
+
+    _revisar(json_path)
+
+    assert "Escuchar" not in preguntas.hechas[0][1]
+
+
+def test_revisar_sin_frases_dudosas(escucha, preguntas, tmp_path, capsys):
+    _, json_path = _transcripcion_diarizada(tmp_path)
+    from utils.formatters import guardar_json, cargar_transcripcion
+    guardar_json([{"start": 0, "end": 5, "text": "Hola a todos.", "speaker": "Hablante 1"}], json_path)
+
+    assert _revisar(json_path) == 0
+    assert "No hay frases dudosas." in capsys.readouterr().out
+    assert preguntas.hechas == []
+
+
+def _procesar_con_dudosas(monkeypatch, tmp_path):
+    from utils.formatters import cargar_json
+    json_path = _con_dudosas(tmp_path)
+    monkeypatch.setattr(procesador, "procesar_entrada", lambda *a, **k: procesador.Resultado(
+        audio_path=tmp_path / "debate.mp3", txt_path=tmp_path / "debate.blocks.txt", json_path=json_path,
+        parrafos=cargar_json(json_path), duracion=40.0))
+    return json_path
+
+
+def test_ofrece_revisar_despues_de_poner_nombres(monkeypatch, tmp_path, escucha, preguntas):
+    json_path = _procesar_con_dudosas(monkeypatch, tmp_path)
+    preguntas.poner("Ahora no",
+                    "Sí, revisarlas", "Es de Ana", "Terminar la revisión")
+
+    resultado = runner.invoke(app, ["transcribir", "debate.mp3", "-d"])
+
+    assert resultado.exit_code == 0, resultado.output
+    mensajes = [h[0] for h in preguntas.hechas]
+    assert "Hay 2 frases en las que dudé de quién habla. ¿Las revisamos?" in mensajes
+    oferta = next(h for h in preguntas.hechas if h[0].startswith("Hay 2 frases"))
+    assert oferta[2] == "Ahora no (puedes hacerlo luego desde la transcripción)"
+    assert _parrafos_guardados(json_path)[1]["text"] == "Gracias por venir."
+
+
+def test_se_puede_no_revisar_las_dudosas(monkeypatch, tmp_path, escucha, preguntas):
+    json_path = _procesar_con_dudosas(monkeypatch, tmp_path)
+    antes = json_path.read_bytes()
+    preguntas.poner("Ahora no", "ESC")
+
+    resultado = runner.invoke(app, ["transcribir", "debate.mp3", "-d"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert json_path.read_bytes() == antes
+
+
+def test_sin_preguntas_no_ofrece_revisar(monkeypatch, tmp_path, escucha, preguntas):
+    _procesar_con_dudosas(monkeypatch, tmp_path)
+
+    resultado = runner.invoke(app, ["transcribir", "debate.mp3", "-d", "--sin-preguntas"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert preguntas.hechas == []

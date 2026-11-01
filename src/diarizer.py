@@ -247,6 +247,14 @@ MIN_PALABRAS_POR_TURNO = 4
 # Un silencio así de largo entre dos palabras también separa frases (Whisper no siempre puntúa)
 PAUSA_ENTRE_FRASES = 0.5
 
+# Marcas de frases con hablante dudoso (la clave "dudosa" de cada segmento). Solo avisan: el texto,
+# el hablante y los tiempos de la frase no cambian, para que luego se puedan revisar a mano.
+# "fuera_de_turno": con un turno de otra persona a menos de tantos segundos
+DISTANCIA_FUERA_DE_TURNO = 1.5
+# "borde": un tramo así de corto pegado a un cambio de hablante suele ser un error de los bordes
+MAX_PALABRAS_BORDE = 6
+MAX_SEGUNDOS_BORDE = 2.0
+
 
 def asignar_hablantes(segmentos: list, turnos: list, etiquetas: dict | None = None) -> list:
     """
@@ -276,6 +284,7 @@ def asignar_hablantes(segmentos: list, turnos: list, etiquetas: dict | None = No
         palabras = []
         resultado.append({**seg, "speaker": _hablante_en(seg["start"], seg["end"], turnos)})
     resultado.extend(_frases_con_hablante(palabras, turnos))
+    _marcar_bordes(resultado)
 
     # Etiquetas legibles y estables: el primero que habla es "Hablante 1"
     mapa = {}
@@ -283,6 +292,15 @@ def asignar_hablantes(segmentos: list, turnos: list, etiquetas: dict | None = No
         if seg["speaker"] not in mapa:
             mapa[seg["speaker"]] = f"{ETIQUETA_GENERICA} {len(mapa) + 1}"
         seg["speaker"] = mapa[seg["speaker"]]
+    # El "otro" de cada marca se traduce con el mismo mapa. Si esa persona nunca habla como
+    # hablante principal no tiene etiqueta ("Hablante N" saldría sin ningún párrafo): se descarta la marca.
+    for seg in resultado:
+        dudosa = seg.get("dudosa")
+        if dudosa is not None:
+            if dudosa["otro"] in mapa:
+                dudosa["otro"] = mapa[dudosa["otro"]]
+            else:
+                del seg["dudosa"]
     if etiquetas is not None:
         etiquetas.update(mapa)
 
@@ -303,19 +321,73 @@ def _hablante_en(inicio: float, fin: float, turnos: list):
 
 
 def _frases_con_hablante(palabras: list, turnos: list) -> list:
-    """Convierte las palabras en segmentos de una frase (o parte de frase) con su hablante."""
+    """
+    Convierte las palabras en segmentos de una frase (o parte de frase) con su hablante.
+    Si el hablante es dudoso, el segmento lleva "dudosa": {"otro": hablante alternativo, "motivo": ...}.
+    """
     segmentos = []
     for frase in _partir_en_frases(palabras):
         hablantes = [_hablante_en(p["start"], p["end"], turnos) for p in frase]
+        # El voto original de cada palabra, para saber qué se absorbió al juntar tramos cortos
+        votos = {id(p): h for p, h in zip(frase, hablantes)}
         for hablante, tramo in _tramos_por_hablante(frase, hablantes):
-            segmentos.append({
+            segmento = {
                 "start": tramo[0]["start"],
                 "end": tramo[-1]["end"],
                 # mlx-whisper deja el espacio delante de cada palabra (" hola")
                 "text": "".join(p["word"] for p in tramo).strip(),
                 "speaker": hablante,
-            })
+            }
+            dudosa = _dudosa_del_tramo(hablante, tramo, votos, turnos)
+            if dudosa:
+                segmento["dudosa"] = dudosa
+            segmentos.append(segmento)
     return segmentos
+
+
+def _dudosa_del_tramo(hablante, tramo: list, votos: dict, turnos: list) -> dict | None:
+    """La marca "repartida" o "fuera_de_turno" de un tramo, o None si no es dudoso."""
+    # a. Palabras que votaban por otro hablante y se absorbieron en este tramo
+    otros = {}
+    for palabra in tramo:
+        voto = votos[id(palabra)]
+        if voto != hablante:
+            otros[voto] = otros.get(voto, 0) + 1
+    if otros:
+        return {"otro": max(otros, key=otros.get), "motivo": "repartida"}
+
+    # b. La mayoría de las palabras no cae en ningún turno (se asignó por cercanía)
+    sin_turno = sum(1 for p in tramo if not any(
+        min(p["end"], t["end"]) - max(p["start"], t["start"]) > 0 for t in turnos))
+    if sin_turno * 2 > len(tramo):
+        inicio, fin = tramo[0]["start"], tramo[-1]["end"]
+        cercanos = [(max(0.0, t["start"] - fin, inicio - t["end"]), t["speaker"])
+                    for t in turnos if t["speaker"] != hablante]
+        cercanos = [c for c in cercanos if c[0] < DISTANCIA_FUERA_DE_TURNO]
+        if cercanos:
+            return {"otro": min(cercanos)[1], "motivo": "fuera_de_turno"}
+    return None
+
+
+def _marcar_bordes(segmentos: list) -> None:
+    """
+    c. Marca como "borde" los tramos cortos pegados a un cambio de hablante (el error más
+    común: la frase corta de un cambio de turno va a la persona equivocada). El "otro" es el
+    hablante del vecino al otro lado del cambio. No pisa una marca que ya tengan.
+    """
+    for i, seg in enumerate(segmentos):
+        if "dudosa" in seg or seg.get("speaker") is None:
+            continue
+        if len(seg["text"].split()) > MAX_PALABRAS_BORDE and seg["end"] - seg["start"] >= MAX_SEGUNDOS_BORDE:
+            continue
+        vecinos = [v for v in (segmentos[i - 1] if i > 0 else None,
+                               segmentos[i + 1] if i + 1 < len(segmentos) else None)
+                   if v is not None and v.get("speaker") not in (None, seg["speaker"])]
+        if not vecinos:
+            continue
+        # Con distintos a ambos lados, el que queda más cerca en el tiempo
+        vecino = min(vecinos, key=lambda v: max(v["start"] - seg["end"], seg["start"] - v["end"]))
+        seg["dudosa"] = {"otro": vecino["speaker"], "motivo": "borde"}
 
 
 def _partir_en_frases(palabras: list) -> list:

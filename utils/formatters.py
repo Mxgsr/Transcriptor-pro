@@ -171,3 +171,40 @@ def cargar_transcripcion(input_path: Path) -> dict:
 def cargar_json(input_path: Path) -> list:
     """Lee los párrafos guardados por guardar_json."""
     return cargar_transcripcion(input_path)["parrafos"]
+
+# Líneas del encabezado que escribe encabezado_de_transcripcion (en ese orden)
+_CLAVES_ENCABEZADO = {"Fecha": "fecha", "Duración": "duracion", "Participantes": "participantes"}
+_LINEA_CON_HORA = re.compile(r"^\[(\d{2,}):(\d{2}):(\d{2})\]\s?(.*)$")
+
+def leer_parrafos_del_txt(txt_path: Path) -> tuple:
+    """
+    Lee un .blocks.txt (para cuando no hay .blocks.json, p. ej. sin hablantes).
+    Retorna (encabezado, parrafos): encabezado es {"titulo", "fecha", "duracion", "participantes"}
+    con los textos tal cual (o {} si el archivo no tiene encabezado); cada párrafo es
+    {"start": segundos, "text": texto}. El hablante no se separa del texto: sin .json no se puede
+    saber si "Ana: hola" es un hablante o parte de la frase.
+    """
+    # utf-8-sig: un .txt guardado de nuevo con el Bloc de notas puede llevar BOM, y con él la primera
+    # línea ya no empieza con «# » ni con «[» (se perdía el título o el primer párrafo)
+    lineas = Path(txt_path).read_text(encoding="utf-8-sig").splitlines()
+    encabezado = {}
+    resto = lineas
+    if lineas and lineas[0].startswith("# "):
+        encabezado["titulo"] = lineas[0][2:].strip()
+        resto = lineas[1:]
+        while resto and not _LINEA_CON_HORA.match(resto[0]):
+            clave, _, valor = resto[0].partition(": ")
+            if clave in _CLAVES_ENCABEZADO and valor:
+                encabezado[_CLAVES_ENCABEZADO[clave]] = valor.strip()
+            resto = resto[1:]
+
+    parrafos = []
+    for linea in resto:
+        coincidencia = _LINEA_CON_HORA.match(linea)
+        if coincidencia:
+            h, m, s, texto = coincidencia.groups()
+            parrafos.append({"start": float(int(h) * 3600 + int(m) * 60 + int(s)), "text": texto.strip()})
+        elif linea.strip() and parrafos:
+            # Un párrafo partido en varias líneas (editado a mano): sigue siendo el mismo
+            parrafos[-1]["text"] = f"{parrafos[-1]['text']} {linea.strip()}".strip()
+    return encabezado, parrafos

@@ -15,6 +15,7 @@ import typer
 import typer.rich_utils
 from rich.console import Console
 from rich.logging import RichHandler
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, ProgressColumn, TaskProgressColumn, TextColumn, TimeElapsedColumn
 from rich.spinner import Spinner
@@ -236,6 +237,8 @@ def ejecutar_transcripcion(entrada: str, modelo: str, hablantes: bool = False, n
                 consola.print("\n[yellow]Nombres sin terminar.[/] Puedes terminarlo luego en «Cambiar nombres de hablantes».")
             else:
                 consola.print("\n[yellow]Nombres sin terminar.[/] Puedes retomarlo luego con [cyan]transcriptor nombres -e[/].")
+
+        _ofrecer_revision_dudosas(resultado, desde_menu)
 
     _mostrar_resumen(resultado, time.monotonic() - inicio, desde_menu)
     _anotar_en_historial(resultado)
@@ -567,6 +570,189 @@ def _reproducir_fragmento(reproductor, audio: Path, fragmento: dict, destino: Pa
         consola.print(f"[yellow]No se pudo reproducir el fragmento ({e}).[/]")
 
 
+
+# --- Revisar frases dudosas ----------------------------------------------------
+
+def _contar_dudosas(json_path) -> int:
+    """Cuántas frases dudosas tiene una transcripción (0 si no hay .json o no se puede leer)."""
+    if not json_path:
+        return 0
+    try:
+        from src import dudosas
+        from utils.formatters import cargar_transcripcion
+        datos = cargar_transcripcion(Path(json_path))
+        return len(dudosas.buscar_dudosas(datos["parrafos"], nombres=datos["nombres"]))
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No se pudieron contar las frases dudosas: {e}")
+        return 0
+
+
+def _ofrecer_revision_dudosas(resultado, desde_menu: bool = False):
+    """
+    Al terminar de transcribir (solo con una persona delante): ofrece revisar las frases en las que
+    se dudó de quién habla. Un fallo aquí nunca debe estropear una transcripción ya hecha.
+    """
+    try:
+        from src import menu, procesador
+
+        n = _contar_dudosas(resultado.json_path)
+        if not n:
+            return
+        mensaje = (f"Hay {n} frases en las que dudé de quién habla. ¿Las revisamos?" if n > 1
+                   else "Hay 1 frase en la que dudé de quién habla. ¿La revisamos?")
+        consola.print()
+        try:
+            quiere = menu.elegir(mensaje, [("Sí, revisarlas", True)],
+                                 texto_volver="Ahora no (puedes hacerlo luego desde la transcripción)")
+        except menu.Atras:
+            quiere = False
+        if quiere and _revisar_dudosas(resultado.json_path, menu):
+            # Los porcentajes del resumen deben reflejar lo corregido
+            resultado.parrafos = procesador.renombrar_hablantes(resultado.json_path, {})[1]
+    except (KeyboardInterrupt, EOFError):
+        consola.print("\n[yellow]Revisión sin terminar.[/] Puedes retomarla luego desde la transcripción.")
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"No se pudo ofrecer la revisión de frases dudosas: {e}")
+
+
+def _recortar_final(texto: str, largo: int = 120) -> str:
+    """Las últimas palabras de un texto largo (lo que está pegado a la frase que sigue)."""
+    texto = " ".join(texto.split())
+    return texto if len(texto) <= largo else "…" + texto[-largo:].lstrip()
+
+
+def _recortar_inicio(texto: str, largo: int = 120) -> str:
+    """El principio de un texto largo."""
+    texto = " ".join(texto.split())
+    return texto if len(texto) <= largo else texto[:largo].rstrip() + "…"
+
+
+def _mostrar_dudosa(parrafos: list, d, nombres: dict, posicion: int, total: int):
+    """Muestra el párrafo anterior (atenuado), el de la frase con ella resaltada, y el siguiente (atenuado)."""
+    from src import dudosas
+
+    def nombre(etiqueta):
+        return dudosas.nombre_visible(etiqueta, nombres)
+
+    consola.print()
+    consola.rule(f"[bold]Frase {posicion} de {total}[/] · [{_reloj(d.start)}]", align="left")
+    if d.indice > 0:
+        antes = parrafos[d.indice - 1]
+        consola.print(Text(f"{nombre(antes.get('speaker') or '')}: {_recortar_final(antes.get('text', ''))}", style="dim"))
+    texto = " ".join((parrafos[d.indice].get("text") or "").split())
+    # La misma posición que usará mover_frase (palabras enteras; si se repite, la de su minuto)
+    pos = dudosas.posicion_en_parrafo(parrafos[d.indice], d)
+    linea = Text(f"{nombre(d.actual)}: ", style="bold cyan")
+    if pos < 0:
+        linea.append(texto)
+    else:
+        linea.append(texto[:pos])
+        linea.append(d.texto, style="bold yellow")
+        linea.append(texto[pos + len(d.texto):])
+    consola.print(linea)
+    if d.indice + 1 < len(parrafos):
+        despues = parrafos[d.indice + 1]
+        consola.print(Text(f"{nombre(despues.get('speaker') or '')}: {_recortar_inicio(despues.get('text', ''))}", style="dim"))
+    consola.print()
+
+
+def _revisar_dudosas(json_path: Path, menu) -> int:
+    """
+    Repasa una por una las frases en las que se dudó de quién habla y deja corregirlas con flechas.
+    Retorna cuántas frases se pasaron a otra persona. Al terminar (fin, «Terminar la revisión», Esc o
+    Ctrl+C) guarda lo hecho, así lo revisado no se vuelve a proponer.
+    """
+    from src import dudosas, procesador
+
+    datos = procesador.leer_transcripcion(Path(json_path))
+    parrafos, nombres, audio = datos["parrafos"], datos["nombres"], datos["audio"]
+    total = len(dudosas.buscar_dudosas(parrafos, nombres=nombres))
+    if not total:
+        consola.print("[dim]No hay frases dudosas.[/]")
+        return 0
+
+    comando = fragmentos.comando_reproductor() if audio else None
+    reproductor = fragmentos.Reproductor(comando) if comando else None
+    cambiadas = revisadas = 0
+    omitidas = set()  # frases que no se pudieron resolver: no se vuelven a proponer (evita repetir sin fin)
+
+    def clave(d):
+        return (d.texto, round(d.start, 2), d.otro)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="transcriptor-") as carpeta:
+            while True:
+                # Se recalcula cada vez: al mover una frase los índices de los párrafos cambian
+                pendientes = [d for d in dudosas.buscar_dudosas(parrafos, nombres=nombres) if clave(d) not in omitidas]
+                if not pendientes:
+                    break
+                d = pendientes[0]
+                revisadas += 1
+                total = max(total, revisadas)
+                _mostrar_dudosa(parrafos, d, nombres, revisadas, total)
+
+                actual, otro = dudosas.nombre_visible(d.actual, nombres), dudosas.nombre_visible(d.otro, nombres)
+                demas = [e for e in _hablantes_en_orden(parrafos) if e not in (d.actual, d.otro)]
+                lista = []
+                if reproductor:
+                    lista.append(("Escuchar", "escuchar"))
+                lista.append((f"Es de {otro}", "otro"))
+                lista.append((f"Está bien (es de {actual})", "bien"))
+                if demas:
+                    lista.append(("Es de otra persona…", "otra"))
+
+                nuevo = None
+                while True:
+                    try:
+                        eleccion = menu.elegir("¿De quién es la frase marcada?", lista, texto_volver="Terminar la revisión")
+                    except menu.Atras:
+                        eleccion = "terminar"
+                    if eleccion == "escuchar":
+                        fragmento = {"start": max(0.0, d.start - 0.5), "end": d.end + 0.5}
+                        _reproducir_fragmento(reproductor, audio, fragmento, Path(carpeta) / f"dudosa-{revisadas}.wav")
+                        continue
+                    if eleccion == "otra":
+                        try:
+                            nuevo = menu.elegir("¿De quién es?", [(dudosas.nombre_visible(e, nombres), e) for e in demas])
+                        except menu.Atras:
+                            continue
+                        eleccion = "mover"
+                    break
+
+                if eleccion == "terminar":
+                    break
+                if eleccion in ("otro", "mover"):
+                    nuevo = d.otro if eleccion == "otro" else nuevo
+                    nuevos = dudosas.mover_frase(parrafos, d, nuevo)
+                    if nuevos != parrafos:
+                        parrafos, cambiadas = nuevos, cambiadas + 1
+                        continue
+                    # No se pudo mover (la frase ya no está en su párrafo): se deja como está
+                nuevos = dudosas.marcar_bien(parrafos, d)
+                if nuevos == parrafos:
+                    omitidas.add(clave(d))
+                parrafos = nuevos
+    except (KeyboardInterrupt, EOFError):
+        consola.print("\n[dim]Revisión interrumpida: guardo lo que llevabas.[/]")
+    finally:
+        if reproductor:
+            reproductor.detener()
+
+    # Sin cambios ni marcas (se terminó de inmediato) no hay nada que guardar
+    if not cambiadas and parrafos == datos["parrafos"]:
+        return 0
+    try:
+        dudosas.guardar(Path(json_path), parrafos)
+    except Exception as e:
+        _mostrar_error(e, detalle=False)
+        return 0
+    if cambiadas:
+        consola.print(f"[green]✓[/] Corregí {cambiadas} {'frase' if cambiadas == 1 else 'frases'}.")
+    else:
+        consola.print("[green]✓[/] Revisión guardada.")
+    return cambiadas
+
+
 class _ColumnaEstado(ProgressColumn):
     """Spinner mientras el paso avanza; ✓ o ✗ cuando termina."""
 
@@ -768,3 +954,67 @@ def _duracion(segundos: float) -> str:
     if m:
         return f"{m} min {s:02d} s"
     return f"{s} s"
+
+
+# ---------------------------------------------------------------------------
+# Clic derecho: «Transcribir con Transcriptor» (comando oculto, ver src/clic_derecho.py)
+# ---------------------------------------------------------------------------
+def _hablantes_para_clic_derecho() -> bool:
+    """Con hablantes si Configuración no dice «nunca» y se puede: disponible aquí, pyannote instalado y con clave."""
+    import importlib.util
+    from src import ajustes, config, plataforma
+
+    if ajustes.valor("modo_hablantes") == ajustes.NUNCA:
+        return False
+    if not plataforma.hablantes_disponible() or not config.HF_TOKEN:
+        return False
+    try:
+        return importlib.util.find_spec("pyannote.audio") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+@app.command("en-fila", hidden=True)
+def en_fila(
+    archivos: Annotated[list[Path], typer.Argument(metavar="ARCHIVO...", show_default=False,
+                                                   help="Audios o videos a transcribir, uno tras otro.")],
+):
+    """Lo llama el clic derecho: transcribe los archivos uno tras otro, sin preguntas, y avisa al terminar cada uno."""
+    from src import ajustes, clic_derecho
+
+    # Nadie mira la terminal: cada resultado se avisa con una notificación
+    algun_fallo = False
+    candado = clic_derecho.tomar_candado(
+        al_esperar=lambda: consola.print("[yellow]Hay otra transcripción en curso: espero mi turno…[/]"))
+    try:
+        for archivo in archivos:
+            if not archivo.is_file():
+                consola_err.print(f"[yellow]Salto {escape(archivo.name or str(archivo))}: no encuentro el archivo.[/]")
+                continue
+            if not clic_derecho.es_audio_o_video(archivo):
+                consola_err.print(f"[yellow]Salto {escape(archivo.name)}: no parece un audio ni un video.[/]")
+                continue
+
+            from src import menu  # importación diferida: solo para fecha_de_grabacion
+            try:
+                resultado = ejecutar_transcripcion(
+                    str(archivo),
+                    ajustes.valor("modelo"),
+                    hablantes=_hablantes_para_clic_derecho(),
+                    idioma=ajustes.valor("idioma"),
+                    salida=ajustes.carpeta("carpeta_salida"),
+                    carpeta_descargas=ajustes.carpeta("carpeta_descargas"),
+                    sin_preguntas=True,
+                    desde_menu=True,
+                    titulo=archivo.stem,
+                    fecha=menu.fecha_de_grabacion(str(archivo)),
+                )
+            except (typer.Exit, Exception):  # el detalle ya lo guardó _mostrar_error
+                algun_fallo = True
+                aviso.notificar("No pude transcribir", f"{archivo.name}. Abre Transcriptor para ver el detalle.")
+                continue
+            aviso.notificar("Transcripción lista", f"Listo: {archivo.stem}, {_duracion(resultado.duracion or 0)}")
+    finally:
+        clic_derecho.soltar_candado(candado)
+
+    raise typer.Exit(1 if algun_fallo else 0)

@@ -243,6 +243,8 @@ def agrupar_segmentos_en_parrafos(segments: list, pause_threshold: float = 2.0, 
     current_end = segments[0]["end"]
     current_texts = [segments[0]["text"].strip()]
     current_speaker = segments[0].get("speaker")
+    # Frases con hablante dudoso (marcadas por la diarización) del párrafo en curso
+    current_dudosas = _dudosa_de(segments[0])
 
     def current_text():
         return " ".join(t for t in current_texts if t)
@@ -263,24 +265,37 @@ def agrupar_segmentos_en_parrafos(segments: list, pause_threshold: float = 2.0, 
         corte_por_hablante = seg.get("speaker") != current_speaker
 
         if corte_por_pausa or corte_por_largo or corte_por_hablante:
-            parrafos.append(_nuevo_parrafo(current_start, current_end, texto_actual, current_speaker))
+            parrafos.append(_nuevo_parrafo(current_start, current_end, texto_actual, current_speaker, current_dudosas))
             current_speaker = seg.get("speaker")
+            current_dudosas = _dudosa_de(seg)
             current_start = seg_start
             current_end = seg_end
             current_texts = [seg_text] if seg_text else []
         else:
             current_end = seg_end
+            current_dudosas += _dudosa_de(seg)
             if seg_text:
                 current_texts.append(seg_text)
 
     texto_final = current_text()
     if texto_final:
-        parrafos.append(_nuevo_parrafo(current_start, current_end, texto_final, current_speaker))
+        parrafos.append(_nuevo_parrafo(current_start, current_end, texto_final, current_speaker, current_dudosas))
 
     return parrafos
 
-def _nuevo_parrafo(start: float, end: float, text: str, speaker) -> dict:
+def _dudosa_de(seg: dict) -> list:
+    """La frase dudosa del segmento (marcada por la diarización) lista para el párrafo, o []."""
+    dudosa = seg.get("dudosa")
+    if not dudosa or not seg["text"].strip():
+        return []
+    return [{"start": seg["start"], "end": seg["end"], "text": seg["text"].strip(),
+             "otro": dudosa["otro"], "motivo": dudosa["motivo"]}]
+
+def _nuevo_parrafo(start: float, end: float, text: str, speaker, dudosas: list = None) -> dict:
     parrafo = {"start": start, "end": end, "text": text}
     if speaker is not None:
         parrafo["speaker"] = speaker
+    # Solo si hay alguna: sin dudas el párrafo queda igual que antes
+    if dudosas:
+        parrafo["dudosas"] = dudosas
     return parrafo

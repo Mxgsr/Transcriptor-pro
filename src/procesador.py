@@ -2,12 +2,14 @@
 # Orquesta el flujo completo sin escribir en pantalla.
 # Quien lo llama (la CLI) decide cómo mostrar el avance y el resultado.
 import logging
+import os
 from datetime import date
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from src.config import HF_TOKEN, DIARIZATION_MODEL, DIARIZATION_DEVICE
+from src import config
+from src.config import DIARIZATION_MODEL, DIARIZATION_DEVICE
 from src.diarizer import cargar_pipeline, diarizar_audio, asignar_hablantes, aplicar_nombres, traducir_huellas
 from src.downloader import descargar_audio
 from src.transcriber import transcribir_audio, agrupar_segmentos_en_parrafos
@@ -32,6 +34,11 @@ class Resultado:
     error_hablantes: Optional[str] = None  # por qué falló la diarización, si falló
     # Huella de voz de cada hablante, {"Hablante 1": [floats]}, para proponer nombres (src/voces.py)
     huellas: dict = field(default_factory=dict)
+
+
+def _token_actual():
+    """La clave de Hugging Face de ahora: guardarla desde el menú vale sin reiniciar el programa."""
+    return os.getenv("HF_TOKEN") or config.HF_TOKEN
 
 
 def _sin_aviso(paso: str):
@@ -89,7 +96,7 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
     pipeline = None
     if diarizar:
         al_avanzar("Preparando hablantes")
-        pipeline = cargar_pipeline(HF_TOKEN, DIARIZATION_MODEL, DIARIZATION_DEVICE)
+        pipeline = cargar_pipeline(_token_actual(), DIARIZATION_MODEL, DIARIZATION_DEVICE)
 
     # PASO 1: Obtener la ruta local del archivo de audio
     if es_url(entrada):
