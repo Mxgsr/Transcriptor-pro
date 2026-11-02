@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+from utils import formatters
+
 from utils.formatters import (
     format_timestamp_hhmmss,
     guardar_txt_con_timestamps,
@@ -68,7 +70,7 @@ def test_guardar_propaga_error_de_escritura(tmp_path):
 
 
 def test_json_guarda_audio_y_nombres_y_lee_el_formato_antiguo(tmp_path):
-    from utils.formatters import guardar_json, cargar_transcripcion, cargar_json
+    from utils.formatters import guardar_json, cargar_transcripcion
 
     parrafos = [{"start": 0, "end": 1, "text": "Hola", "speaker": "Hablante 1"}]
     nuevo = tmp_path / "nuevo.blocks.json"
@@ -78,7 +80,7 @@ def test_json_guarda_audio_y_nombres_y_lee_el_formato_antiguo(tmp_path):
         "audio": str(tmp_path / "a.mp3"), "nombres": {"Hablante 1": "Ana"}, "parrafos": parrafos, "huellas": {},
         "titulo": None, "fecha": None, "duracion": None,
     }
-    assert cargar_json(nuevo) == parrafos
+    assert cargar_transcripcion(nuevo)["parrafos"] == parrafos
 
     antiguo = tmp_path / "antiguo.blocks.json"
     antiguo.write_text('[{"start": 0, "end": 1, "text": "Hola", "speaker": "Ana"}]', encoding="utf-8")
@@ -174,3 +176,38 @@ def test_leer_parrafos_del_txt_con_bom(tmp_path):
     assert leer_parrafos_del_txt(txt) == ({}, [{"start": 5.0, "text": "hola"}, {"start": 9.0, "text": "chao"}])
     txt.write_bytes("# Plan\n\n[00:00:05] hola".encode("utf-8-sig"))
     assert leer_parrafos_del_txt(txt) == ({"titulo": "Plan"}, [{"start": 5.0, "text": "hola"}])
+
+
+# --- escritura atómica y BOM ---
+
+def test_salidas_byte_a_byte_iguales_a_las_de_antes(tmp_path):
+    parrafos = [{"start": 0, "text": "Hola ñandú", "speaker": "Ana"}, {"start": 65, "text": "Qué tal"}]
+    txt, js = tmp_path / "r.blocks.txt", tmp_path / "r.blocks.json"
+    formatters.guardar_txt_con_timestamps(parrafos, txt, encabezado="# T\n\n")
+    formatters.guardar_json(parrafos, js, audio=tmp_path / "r.mp3", nombres={"Hablante 1": "Ana"})
+    assert txt.read_bytes() == "# T\n\n[00:00:00] Ana: Hola ñandú\n\n[00:01:05] Qué tal".encode("utf-8")
+    esperado = json.dumps({"audio": str(tmp_path / "r.mp3"), "nombres": {"Hablante 1": "Ana"},
+                           "parrafos": parrafos}, ensure_ascii=False, indent=2)
+    assert js.read_bytes() == esperado.encode("utf-8")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["r.blocks.json", "r.blocks.txt"]
+
+
+def test_cargar_transcripcion_con_bom(tmp_path):
+    ruta = tmp_path / "b.blocks.json"
+    ruta.write_bytes(b"\xef\xbb\xbf" + json.dumps({"parrafos": [{"start": 0, "text": "a"}]}).encode("utf-8"))
+    assert formatters.cargar_transcripcion(ruta)["parrafos"] == [{"start": 0, "text": "a"}]
+
+
+def test_json_editado_a_mano_e_invalido_da_error_y_no_se_aparta(tmp_path):
+    ruta = tmp_path / "m.blocks.json"
+    ruta.write_text("{ roto", encoding="utf-8")
+    with pytest.raises(ValueError):
+        formatters.cargar_transcripcion(ruta)
+    assert ruta.exists() and not (tmp_path / "m.blocks.json.corrupto").exists()
+
+
+@pytest.mark.parametrize("segundos, texto", [(0, "0:00"), (9, "0:09"), (2530.9, "42:10"), (3725, "1:02:05")])
+def test_formato_reloj(segundos, texto):
+    from utils.formatters import formato_reloj
+
+    assert formato_reloj(segundos) == texto

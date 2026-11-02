@@ -1,7 +1,7 @@
 # Ubicación: tests/test_repeticiones.py
 import pytest
 
-from src.repeticiones import limpiar_parrafos, limpiar_segmentos, quitar_repeticiones
+from src.repeticiones import limpiar_segmentos, quitar_repeticiones
 
 
 @pytest.mark.parametrize("antes, despues", [
@@ -54,15 +54,3 @@ def test_limpiar_segmentos_respeta_dos_seguidos_y_quita_las_palabras_de_un_texto
     assert [s["text"] for s in limpios] == ["Sí.", "Sí.", "Gracias."]
     assert "words" in limpios[0]
     assert "words" not in limpios[2]
-
-
-def test_limpiar_parrafos_guarda_el_original_si_se_pide():
-    parrafos = [
-        {"start": 0, "end": 1, "text": "Gracias. Gracias. Gracias. Gracias.", "speaker": "Hablante 1"},
-        {"start": 1, "end": 2, "text": "De nada."},
-    ]
-    limpios = limpiar_parrafos(parrafos, guardar_original=True)
-    assert limpios[0] == {"start": 0, "end": 1, "text": "Gracias.", "speaker": "Hablante 1",
-                          "texto_original": "Gracias. Gracias. Gracias. Gracias."}
-    assert "texto_original" not in limpios[1]
-    assert "texto_original" not in limpiar_parrafos(parrafos)[0]

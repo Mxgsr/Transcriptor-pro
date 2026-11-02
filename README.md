@@ -38,7 +38,7 @@ No necesitas instalar nada antes: el instalador trae todo lo necesario.
 
 ### Actualizar o desinstalar
 
-- **Actualizar:** vuelve a pegar la misma línea de instalación.
+- **Actualizar:** lo más simple es abrir `transcriptor` y elegir **Configuración › Buscar actualizaciones**; si hay una versión nueva, **Actualizar ahora** la instala sin pegar nada. Si ese camino no te funciona (por ejemplo, en la beta 1, que aún no lo tiene), vuelve a pegar la misma línea de instalación (si usas la beta, pega la línea de la sección «Probar la versión beta»).
 - **Desinstalar:** escribe `uv tool uninstall transcriptor-pro`.
 
 ## 🧪 Probar la versión beta
@@ -49,7 +49,7 @@ Primero haz la instalación normal de arriba (así queda instalado `uv`, el prog
 uv tool install --force --reinstall-package transcriptor-pro --python 3.11 "transcriptor-pro[diarizacion] @ https://github.com/Mxgsr/Transcriptor-pro/archive/refs/heads/v2.zip"
 ```
 
-Tus transcripciones, tu configuración y tu token se conservan. Desde esta versión, **Configuración › Buscar actualizaciones** sirve para pasar a las versiones nuevas sin pegar esta línea otra vez (si tienes la beta 1, que aún no lo tiene, pega la línea una vez más). Para volver a la versión estable, pega otra vez la línea de instalación normal. Si tienes dudas, pídele a Max el comando.
+Tus transcripciones, tu configuración y tu token se conservan. Para pasar a las versiones nuevas, mira «Actualizar o desinstalar» más arriba (si ese camino no te funciona, o tienes la beta 1, pega esta línea una vez más; no la línea de instalación normal, que te dejaría en la versión estable). Para volver a la versión estable, pega otra vez la línea de instalación normal. Si tienes dudas, pídele a Max el comando.
 
 ## 🗣️ Reconocer quién habla (opcional)
 
@@ -115,7 +115,7 @@ En **Mis transcripciones**, **Buscar en todas…** busca una palabra o frase en 
 - **Clave de Hugging Face:** te guía paso a paso, abre las páginas necesarias, comprueba la clave que pegues y la guarda.
 - **Modelos:** muestra qué modelos están en tu computador y cuánto pesan, y deja **Descargar** o **Eliminar** cada uno.
 - **Preparar la app:** deja lista la clave y descarga el modelo por defecto y el de hablantes. Aparece en el menú principal mientras falte algo.
-- **Transcribir con clic derecho:** agrega «Transcribir con Transcriptor» al clic derecho de un audio o video. Transcribe con tu configuración, sin preguntas, uno tras otro si son varios, y avisa al terminar cada uno.
+- **Transcribir con clic derecho:** agrega «Transcribir con Transcriptor» al clic derecho de un audio o video. Se abre una ventana donde ves el avance; al terminar le pones nombre a quien habla, como desde el menú. Usa tu configuración y, si eliges varios, los hace uno tras otro.
 - **Buscar actualizaciones:** compara tu versión con la última y, si hay una nueva, **Actualizar ahora** la instala sin volver a pegar la línea del instalador. Si el programa está abierto y tu computador no permite reemplazarlo, se abre una ventana aparte que actualiza cuando lo cierras.
 
 ### Mientras trabaja

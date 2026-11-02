@@ -14,3 +14,16 @@ def es_mac_con_chip_apple() -> bool:
 
 def hablantes_disponible() -> bool:
     return sys.platform != "darwin" or es_mac_con_chip_apple()
+
+
+# Se lee sys.platform en cada llamada (no al importar) para que las pruebas puedan cambiarlo.
+def es_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def es_mac() -> bool:
+    return sys.platform == "darwin"
+
+
+def es_linux() -> bool:
+    return sys.platform.startswith("linux")

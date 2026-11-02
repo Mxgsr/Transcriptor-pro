@@ -5,11 +5,11 @@
 # El texto del usuario nunca se pega en el HTML: viaja como JSON escapado y el DOM se arma con textContent.
 import json
 import logging
-import webbrowser
 from pathlib import Path
 from typing import Optional
 
-from src import historial
+from src import historial, sistema
+from utils.archivos import escribir_texto
 from utils.formatters import (
     fecha_en_espanol, formato_duracion, leer_parrafos_del_txt, nombre_de_archivo_seguro,
     participantes_en_orden,
@@ -103,10 +103,10 @@ def crear_vista(txt: Path, json_path: Optional[Path] = None, audio: Optional[Pat
                 ir_a: Optional[float] = None) -> Path:
     """Escribe la vista en <carpeta de datos>/vistas/<nombre>.html (se sobrescribe) y retorna su ruta."""
     datos = datos_de_vista(txt, json_path, audio)
-    carpeta = historial.carpeta() / "vistas"
-    carpeta.mkdir(parents=True, exist_ok=True)
+    # Privada: la página lleva la transcripción entera y no deben leerla otros usuarios del computador
+    carpeta = historial.carpeta_privada("vistas")
     ruta = carpeta / (nombre_de_archivo_seguro(_nombre_base(txt)) + ".html")
-    ruta.write_text(generar_html(datos, ir_a), encoding="utf-8")
+    escribir_texto(ruta, generar_html(datos, ir_a), privado=True)
     logger.info(f"Vista guardada en: {ruta}")
     return ruta
 
@@ -114,10 +114,14 @@ def crear_vista(txt: Path, json_path: Optional[Path] = None, audio: Optional[Pat
 def abrir_en_navegador(ruta: Path) -> bool:
     """Abre la página en el navegador. Sin '#' en la URL: en algunos sistemas se pierde al abrir archivos."""
     try:
-        return bool(webbrowser.open(Path(ruta).resolve().as_uri()))
+        url = Path(ruta).resolve().as_uri()
     except Exception as e:
         logger.warning(f"No se pudo abrir el navegador: {e}")
         return False
+    abierto = sistema.abrir_pagina(url)
+    if not abierto:
+        logger.debug("No se pudo abrir el navegador")
+    return abierto
 
 
 _PLANTILLA = r"""<!doctype html>

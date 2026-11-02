@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from src import ajustes, config, errores, historial, plataforma, transcriber
+from utils.archivos import escribir_texto
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,8 @@ def repo_de(clave: str) -> str:
         from faster_whisper.utils import _MODELS
         if nombre in _MODELS:
             return _MODELS[nombre]
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         pass
     return nombre
 
@@ -112,7 +114,8 @@ def estado(claves: Optional[list] = None) -> list:
     for clave in claves:
         try:
             repo = repo_de(clave)
-        except Exception:  # un nombre que el motor no reconoce
+        except Exception as e:  # un nombre que el motor no reconoce
+            logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
             continue
         info = cache.get(repo)
         lista.append(EstadoModelo(clave, _nombre_visible(clave), repo, info is not None,
@@ -163,7 +166,8 @@ def _clase_tqdm(progreso: Callable[[int, int], None]):
     """
     try:
         from tqdm.auto import tqdm as base
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         class base:  # sin tqdm instalado: lo mínimo que huggingface_hub usa de una barra
             def __init__(self, *args, **kwargs):
                 self.total = kwargs.get("total")
@@ -287,7 +291,8 @@ def _descargar_faster(clave: str, repo: str):
     """faster-whisper baja solo los archivos que usa (no todo el repo): se deja que él lo haga."""
     try:
         from faster_whisper.utils import download_model
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         download_model = None
     if download_model is not None:
         download_model(transcriber.MODELOS_FASTER.get(clave, clave))
@@ -371,8 +376,7 @@ def guardar_token(token: str) -> Path:
     token = token.strip()
     if not token or any(c.isspace() for c in token):
         raise ValueError("La clave está vacía o tiene espacios.")  # sin incluir la clave
-    ruta = historial.carpeta() / ".env"
-    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta = historial.carpeta_privada() / ".env"
     try:
         lineas = ruta.read_text(encoding="utf-8-sig").splitlines()
     except OSError:
@@ -388,11 +392,9 @@ def guardar_token(token: str) -> Path:
             resultado.append(linea)
     if not puesta:
         resultado.append(nueva)
-    ruta.write_text("\n".join(resultado) + "\n", encoding="utf-8")
-    try:
-        ruta.chmod(0o600)
-    except OSError:
-        logger.debug("No se pudo restringir el permiso del .env")
+    # Escritura atómica privada: el temporal nace con 0600 y reemplaza al .env de una vez, así la clave
+    # nunca está legible por otros (antes se escribía y luego se hacía chmod: quedaba un instante abierta)
+    escribir_texto(ruta, "\n".join(resultado) + "\n", privado=True)
     os.environ["HF_TOKEN"] = token
     config.HF_TOKEN = token
     logger.info("Clave de Hugging Face guardada")

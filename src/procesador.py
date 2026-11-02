@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from src import config
+from src import config, errores
 from src.config import DIARIZATION_MODEL, DIARIZATION_DEVICE
 from src.diarizer import cargar_pipeline, diarizar_audio, asignar_hablantes, aplicar_nombres, traducir_huellas
 from src.downloader import descargar_audio
@@ -71,7 +71,8 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
                      al_fallar: Callable[[str], None] = _sin_aviso,
                      al_progresar: Optional[Callable] = None,
                      silenciar_motores: bool = False, titulo: Optional[str] = None,
-                     fecha: Optional[date | str] = None) -> Resultado:
+                     fecha: Optional[date | str] = None,
+                     continuar_sin_hablantes: bool = False) -> Resultado:
     """
     Controla el flujo principal del programa:
     Descarga -> Transcripción -> (Diarización) -> Agrupación -> Guardado.
@@ -85,6 +86,9 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
     titulo y fecha (la de la grabación; hoy si falta) vienen del menú: con título el archivo se llama
     "<AAAA-MM-DD> <Título>.blocks.txt" y el .txt lleva encabezado. Sin título todo queda como siempre
     (<nombre del audio>.blocks.txt, sin encabezado).
+    continuar_sin_hablantes: si preparar los hablantes falla (sin clave, sin internet, condiciones del modelo
+    sin aceptar), sigue transcribiendo sin ellos y deja el motivo en error_hablantes. Es para cuando no hay
+    nadie delante (Grabador, --sin-preguntas): lo peor sería quedarse sin .blocks.txt. Con False falla rápido.
     """
     nombres = nombres or {}
     if titulo is not None:
@@ -94,9 +98,20 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
 
     # Cargamos la diarización antes de transcribir para fallar rápido si falta el token
     pipeline = None
+    error_preparacion = None
     if diarizar:
         al_avanzar("Preparando hablantes")
-        pipeline = cargar_pipeline(_token_actual(), DIARIZATION_MODEL, DIARIZATION_DEVICE)
+        try:
+            pipeline = cargar_pipeline(_token_actual(), DIARIZATION_MODEL, DIARIZATION_DEVICE)
+        except Exception as e:
+            if not continuar_sin_hablantes:
+                raise
+            # Sin nadie delante (Grabador, clic derecho) este texto llega al resumen: mejor el mensaje simple
+            # que «401 Unauthorized»; y se guarda el detalle para poder verlo después.
+            error_preparacion = errores.mensaje_simple(e) or str(e) or type(e).__name__
+            errores.guardar_detalle(e)
+            logger.info(f"No se pudo preparar la diarización; se transcribe sin hablantes. Motivo: {error_preparacion}")
+            al_fallar(error_preparacion)
 
     # PASO 1: Obtener la ruta local del archivo de audio
     if es_url(entrada):
@@ -130,7 +145,7 @@ def procesar_entrada(entrada: str, modelo: str, diarizar: bool = False, nombres:
     else:
         txt_path = _ruta_libre(carpeta, f"{fecha.isoformat()} {nombre_de_archivo_seguro(titulo)}")
     json_path = None
-    error_hablantes = None
+    error_hablantes = error_preparacion
     huellas = {}
 
     logger.info("Agrupando los segmentos en párrafos legibles...")

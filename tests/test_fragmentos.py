@@ -38,11 +38,12 @@ def test_elegir_fragmentos_prefiere_los_parrafos_mas_largos():
 def test_extraer_fragmento_llama_a_ffmpeg(tmp_path, monkeypatch):
     run = MagicMock()
     monkeypatch.setattr(fragmentos.subprocess, "run", run)
+    monkeypatch.setattr(fragmentos, "ruta_ffmpeg", lambda: "/ruta/completa/ffmpeg")
 
     fragmentos.extraer_fragmento(tmp_path / "a.mp3", 75.5, 10, tmp_path / "f.wav")
 
     cmd = run.call_args.args[0]
-    assert cmd[0] == "ffmpeg"
+    assert cmd[0] == "/ruta/completa/ffmpeg"  # nunca "ffmpeg" a secas (en Windows miraría la carpeta actual)
     assert cmd[cmd.index("-ss") + 1] == "75.50"
     assert cmd[cmd.index("-t") + 1] == "10.00"
     assert cmd[cmd.index("-i") + 1] == str(tmp_path / "a.mp3")
@@ -80,12 +81,22 @@ def test_reproductor_detiene_lo_anterior(monkeypatch, tmp_path):
 
 def test_comando_reproductor_en_windows_usa_winsound(monkeypatch):
     monkeypatch.setattr(fragmentos.shutil, "which", lambda c: None)
-    monkeypatch.setattr(fragmentos.sys, "platform", "win32")
+    monkeypatch.setattr("sys.platform", "win32")
 
     comando = fragmentos.comando_reproductor()
 
     assert comando[0] == fragmentos.sys.executable
     assert "winsound" in comando[-1]
+    # -I: un winsound.py dejado en la carpeta actual no se importa
+    assert comando[1:3] == ["-I", "-c"]
+
+
+def test_en_windows_no_busca_afplay(monkeypatch):
+    # Aunque haya un afplay.exe (por ejemplo, en la carpeta actual), en Windows se usa winsound
+    monkeypatch.setattr(fragmentos.shutil, "which", lambda c: "C:\\audio\\" + c + ".exe")
+    monkeypatch.setattr("sys.platform", "win32")
+
+    assert fragmentos.comando_reproductor()[0] == fragmentos.sys.executable
 
 
 def test_buscar_audio_movido_con_su_nombre_junto_al_json(tmp_path):
@@ -96,3 +107,19 @@ def test_buscar_audio_movido_con_su_nombre_junto_al_json(tmp_path):
 
     assert fragmentos.buscar_audio(json_path, "/otra/carpeta/zoom_0.m4a") == audio
     assert fragmentos.buscar_audio(json_path, r"C:\Users\ana\zoom_0.m4a") == audio
+
+
+def test_ffmpeg_y_reproductor_no_heredan_el_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("HF_TOKEN", "hf_secreto")
+    monkeypatch.setenv("VARIABLE_NORMAL", "se_queda")
+    run, popen = MagicMock(), MagicMock()
+    monkeypatch.setattr(fragmentos.subprocess, "run", run)
+    monkeypatch.setattr(fragmentos.subprocess, "Popen", popen)
+    monkeypatch.setattr(fragmentos, "ruta_ffmpeg", lambda: "/ruta/completa/ffmpeg")
+
+    fragmentos.extraer_fragmento(tmp_path / "a.mp3", 0, 10, tmp_path / "f.wav")
+    fragmentos.Reproductor(["afplay"]).reproducir(tmp_path / "f.wav")
+
+    for llamada in (run.call_args, popen.call_args):
+        env = llamada.kwargs["env"]
+        assert "HF_TOKEN" not in env and env["VARIABLE_NORMAL"] == "se_queda"

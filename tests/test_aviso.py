@@ -11,6 +11,9 @@ import pytest
 
 from src import aviso
 
+# Ruta completa del PowerShell de Windows: por nombre, Windows usaría uno de la carpeta actual
+POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
 
 class Registro:
     """Falso subprocess.run/Popen que anota las llamadas."""
@@ -111,11 +114,12 @@ def test_notificar_mac_pasa_texto_como_argumentos(monkeypatch, reg):
 
 def test_notificar_windows_no_interpola_el_texto(monkeypatch, reg):
     monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("SystemRoot", raising=False)  # sin la variable: C:\Windows
     monkeypatch.setitem(sys.modules, "winsound", types.SimpleNamespace(MessageBeep=lambda: None))
     titulo, mensaje = "'; Remove-Item -Recurse C:\\ #", '"$(calc)" ñ'
     aviso.notificar(titulo, mensaje)
     comando, kw = reg.llamadas[0]
-    assert comando[:6] == ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"]
+    assert comando[:6] == [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand"]
     script = decodificar(comando)
     assert "Remove-Item" not in script and "calc" not in script
     assert "$env:AVISO_TITULO" in script and "ToastText02" in script
@@ -300,3 +304,65 @@ def test_sin_avisar_no_falla():
     reloj = Reloj()
     with aviso.confirmar_cancelar(0, None, 5, reloj=reloj):
         signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+
+
+def test_powershell_va_con_la_ruta_de_systemroot(monkeypatch, reg):
+    # Windows instalado en otra unidad: la ruta sale de SystemRoot, no se adivina
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setenv("SystemRoot", r"D:\WINDOWS")
+    monkeypatch.setitem(sys.modules, "winsound", types.SimpleNamespace(MessageBeep=lambda: None))
+    aviso.notificar("Listo", "Terminó")
+    assert reg.llamadas[0][0][0] == r"D:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def test_portapapeles_windows_usa_la_ruta_completa(monkeypatch, reg):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("SystemRoot", raising=False)
+    assert aviso.copiar_al_portapapeles("hola") is True
+    assert reg.llamadas[0][0][0] == POWERSHELL
+
+
+# --- Sin el token de Hugging Face en los programas que lanzamos -------------------
+@pytest.fixture
+def con_token(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_secreto")
+    monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "hf_secreto")
+    monkeypatch.setenv("VARIABLE_NORMAL", "se_queda")
+
+
+def _sin_token(kw):
+    env = kw["env"]
+    assert "HF_TOKEN" not in env and "HUGGING_FACE_HUB_TOKEN" not in env
+    assert env["VARIABLE_NORMAL"] == "se_queda"  # el resto del entorno se hereda igual
+    return env
+
+
+def test_caffeinate_no_hereda_el_token(monkeypatch, reg, con_token):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with aviso.sin_dormir():
+        pass
+    _sin_token(reg.llamadas[0][1])
+
+
+def test_notificar_no_hereda_el_token_en_ningun_sistema(monkeypatch, reg, con_token):
+    monkeypatch.setitem(sys.modules, "winsound", types.SimpleNamespace(MessageBeep=lambda: None))
+    monkeypatch.setattr(aviso.shutil, "which", lambda c: "/usr/bin/" + c)
+    for plataforma in ("darwin", "win32", "linux"):
+        monkeypatch.setattr(sys, "platform", plataforma)
+        aviso.notificar("Listo", "Terminó")
+    assert len(reg.llamadas) == 3
+    for _, kw in reg.llamadas:
+        _sin_token(kw)
+    # PowerShell conserva sus variables propias
+    assert reg.llamadas[1][1]["env"]["AVISO_TITULO"] == "Listo"
+
+
+def test_portapapeles_no_hereda_el_token_en_ningun_sistema(monkeypatch, reg, con_token):
+    monkeypatch.setattr(aviso.shutil, "which", lambda c: "/usr/bin/" + c)
+    for plataforma in ("darwin", "win32", "linux"):
+        monkeypatch.setattr(sys, "platform", plataforma)
+        assert aviso.copiar_al_portapapeles("hola") is True
+    mac, windows, linux = (kw for _, kw in reg.llamadas)
+    assert _sin_token(mac)["LANG"] == "en_US.UTF-8"
+    assert "AVISO_ARCHIVO" in _sin_token(windows)
+    _sin_token(linux)

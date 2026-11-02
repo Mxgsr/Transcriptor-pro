@@ -1,8 +1,13 @@
 # Ubicación: tests/test_vista.py
 # Pruebas de la vista de lectura con audio (src/vista.py), sin navegador.
 import json
+import os
 import re
+import stat
+import sys
 from datetime import date
+
+import pytest
 
 from src import vista
 from utils.formatters import guardar_json, guardar_txt_con_timestamps
@@ -130,11 +135,41 @@ def test_abrir_en_navegador(tmp_path, monkeypatch):
     ruta = tmp_path / "v.html"
     ruta.write_text("x")
     llamadas = []
-    monkeypatch.setattr(vista.webbrowser, "open", lambda url: llamadas.append(url) or True)
+    monkeypatch.setattr("webbrowser.open", lambda url: llamadas.append(url) or True)
     assert vista.abrir_en_navegador(ruta) is True
     assert llamadas[0].startswith("file://") and "#" not in llamadas[0]
 
     def falla(url):
         raise RuntimeError("sin navegador")
-    monkeypatch.setattr(vista.webbrowser, "open", falla)
+    monkeypatch.setattr("webbrowser.open", falla)
     assert vista.abrir_en_navegador(ruta) is False
+
+
+# --- Permisos: la página lleva la transcripción entera ---
+
+@pytest.mark.skipif(sys.platform == "win32", reason="en Windows no hay permisos POSIX")
+def test_vista_queda_privada(tmp_path, historial_temporal):
+    txt, json_path = _crear_con_json(tmp_path)
+    anterior = os.umask(0o022)
+    try:
+        ruta = vista.crear_vista(txt, json_path)
+    finally:
+        os.umask(anterior)
+    assert stat.S_IMODE(os.stat(ruta).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(ruta.parent).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(historial_temporal).st_mode) == 0o700
+
+
+def test_vista_mismo_contenido_que_generar_html(tmp_path, historial_temporal):
+    txt, json_path = _crear_con_json(tmp_path)
+    ruta = vista.crear_vista(txt, json_path, ir_a=2)
+    assert ruta.read_bytes() == vista.generar_html(vista.datos_de_vista(txt, json_path), 2).encode("utf-8")
+
+
+def test_vista_en_windows_no_lanza(tmp_path, historial_temporal, monkeypatch):
+    from utils import archivos
+    monkeypatch.setattr(archivos, "_es_windows", lambda: True)
+    monkeypatch.delattr(archivos.os, "getuid", raising=False)
+    monkeypatch.setattr(archivos.os, "chmod", lambda *a, **k: None)
+    txt, json_path = _crear_con_json(tmp_path)
+    assert vista.crear_vista(txt, json_path).exists()

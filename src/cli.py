@@ -4,6 +4,8 @@
 import contextlib
 import json
 import logging
+import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -24,7 +26,8 @@ from rich.text import Text
 
 from src.diarizer import parsear_nombres
 from src.ffmpeg_local import asegurar_ffmpeg
-from src import aviso, errores, fragmentos
+from src import aviso, errores, fragmentos, plataforma
+from utils.formatters import formato_duracion, formato_reloj
 
 # Títulos de la ayuda en español (Typer los trae en inglés)
 typer.rich_utils.ARGUMENTS_PANEL_TITLE = "Argumentos"
@@ -43,6 +46,8 @@ app = typer.Typer(
 # Pantalla normal (progreso y resumen) y pantalla de errores y avisos
 consola = Console()
 consola_err = Console(stderr=True)
+
+logger = logging.getLogger(__name__)
 
 # Archivo con el detalle del último error mostrado (None si no hubo). Se limpia al empezar cada comando;
 # el menú lo usa para ofrecer «Ver el detalle» y «Copiar el error».
@@ -67,6 +72,9 @@ def principal(ctx: typer.Context):
     # Antes de que alguna librería importe huggingface_hub, que lee HF_HUB_OFFLINE al importarse
     from src import ajustes
     ajustes.aplicar_sin_internet()
+    if ctx.invoked_subcommand != "en-fila":  # en-fila puede estar corriendo desde el .cmd antiguo: no se lo borres
+        from src import clic_derecho
+        clic_derecho.migrar_si_hace_falta()
     if ctx.invoked_subcommand is not None:
         return
     # Sin comando: en una terminal, el menú; en un script (sin nadie que responda), la ayuda
@@ -131,7 +139,7 @@ def transcribir(
     try:
         mapa_nombres = parsear_nombres(nombres)
     except ValueError as e:
-        raise typer.BadParameter(str(e), param_hint="--nombres") from None
+        raise typer.BadParameter(_limpio(e), param_hint="--nombres") from None
 
     # Lo que no se indica sale de la configuración (menú Configuración, o el .env)
     from src import ajustes
@@ -155,17 +163,20 @@ def ejecutar_transcripcion(entrada: str, modelo: str, hablantes: bool = False, n
                            minimo: Optional[int] = None, maximo: Optional[int] = None, nombres: Optional[dict] = None,
                            idioma: str = "es", salida: Optional[Path] = None, carpeta_descargas: Optional[Path] = None,
                            detalle: bool = False, sin_preguntas: bool = False, desde_menu: bool = False,
-                           titulo: Optional[str] = None, fecha=None):
+                           titulo: Optional[str] = None, fecha=None, al_terminar_trabajo=None):
     """
     Transcribe con todo ya decidido (lo usan el comando `transcribir` y el menú).
     salida=None guarda junto al audio. Retorna el Resultado; si falla, lo muestra y sale con typer.Exit.
     desde_menu: los avisos no nombran comandos (quien usa el menú no los conoce).
     titulo y fecha (date o AAAA-MM-DD) los manda el menú: nombran el archivo y ponen el encabezado.
+    al_terminar_trabajo: se llama al acabar lo pesado (transcribir y diarizar), antes de las preguntas de
+    nombres y frases dudosas; `en-fila` lo usa para soltar su candado y no bloquear a los demás mientras alguien
+    decide qué nombre poner.
     """
     global ultimo_error
     ultimo_error = None
     mapa_nombres = nombres or {}
-    cabecera = f"\n [bold]Transcriptor Pro[/] · modelo [cyan]{modelo}[/]"
+    cabecera = f"\n [bold]Transcriptor Pro[/] · modelo [cyan]{_marcado(modelo)}[/]"
     if hablantes:
         cabecera += " · con hablantes"
     consola.print(cabecera + "\n")
@@ -200,45 +211,56 @@ def ejecutar_transcripcion(entrada: str, modelo: str, hablantes: bool = False, n
                 silenciar_motores=not detalle,
                 titulo=titulo,
                 fecha=fecha,
+                # Sin nadie delante (Grabador, scripts, clic derecho sin ventana) la transcripción no se
+                # puede perder porque falle la preparación de hablantes: se guarda sin ellos
+                continuar_sin_hablantes=not con_persona,
             )
     except KeyboardInterrupt:
         consola_err.print("\n[yellow]Cancelado.[/]")
-        raise typer.Exit(130)
+        raise typer.Exit(130) from None
     except Exception as e:
         _mostrar_error(e, detalle)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
+
+    if al_terminar_trabajo:
+        al_terminar_trabajo()
 
     # Si tardó, la persona pudo irse a otra cosa: la avisamos ANTES de preguntar por los nombres
     if con_persona and time.monotonic() - inicio > SEGUNDOS_TRABAJO_LARGO:
         nombre_listo = Path(resultado.txt_path).name.removesuffix(".blocks.txt")
-        aviso.notificar("Transcripción lista", f"Listo: {nombre_listo}, {_duracion(resultado.duracion)}")
+        aviso.notificar("Transcripción lista", f"Listo: {nombre_listo}, {formato_duracion(resultado.duracion)}")
 
-    # Nombres dados con --nombres: los recordamos para ofrecerlos la próxima vez
-    if resultado.json_path and mapa_nombres:
-        _recordar_personas(mapa_nombres.values())
-        _guardar_voces(mapa_nombres, resultado.huellas, resultado.json_path)
+    # Todo lo de después (nombres, voces, frases dudosas) toca archivos: si falla algo (p. ej. el .txt está
+    # abierto en Word), la transcripción ya hecha no se pierde ni tumba el menú; se muestra el error y se sigue
+    try:
+        # Nombres dados con --nombres: los recordamos para ofrecerlos la próxima vez
+        if resultado.json_path and mapa_nombres:
+            _recordar_personas(mapa_nombres.values())
+            _guardar_voces(mapa_nombres, resultado.huellas, resultado.json_path)
 
-    # Con hablantes y sin nombres dados: ofrecemos escucharlos para ponerles nombre
-    if resultado.json_path and not mapa_nombres and not sin_preguntas and _es_interactivo():
-        try:
-            from src import menu
-            cuantos = len(_hablantes_en_orden(resultado.parrafos))
-            consola.print()
-            if _quiere_poner_nombres(menu, cuantos):
-                sugerencias = _sugerir_por_voz(resultado.huellas, {}, resultado.parrafos)
-                mapa = _escuchar_y_nombrar(resultado.parrafos, {}, resultado.audio_path, sugerencias)
-                if mapa:
-                    # Solo lo confirmado: si cortó a mitad (Ctrl+C), nada llega aquí y no se guarda nada
-                    _guardar_voces(mapa, resultado.huellas, resultado.json_path)
-                    _, resultado.parrafos = procesador.renombrar_hablantes(resultado.json_path, mapa)
-                    _recordar_personas(mapa.values())
-        except (KeyboardInterrupt, EOFError):
-            if desde_menu:
-                consola.print("\n[yellow]Nombres sin terminar.[/] Puedes terminarlo luego en «Cambiar nombres de hablantes».")
-            else:
-                consola.print("\n[yellow]Nombres sin terminar.[/] Puedes retomarlo luego con [cyan]transcriptor nombres -e[/].")
+        # Con hablantes y sin nombres dados: ofrecemos escucharlos para ponerles nombre
+        if resultado.json_path and not mapa_nombres and not sin_preguntas and _es_interactivo():
+            try:
+                from src import menu
+                cuantos = len(_hablantes_en_orden(resultado.parrafos))
+                consola.print()
+                if _quiere_poner_nombres(menu, cuantos):
+                    sugerencias = _sugerir_por_voz(resultado.huellas, {}, resultado.parrafos)
+                    mapa = _escuchar_y_nombrar(resultado.parrafos, {}, resultado.audio_path, sugerencias)
+                    if mapa:
+                        # Solo lo confirmado: si cortó a mitad (Ctrl+C), nada llega aquí y no se guarda nada
+                        _guardar_voces(mapa, resultado.huellas, resultado.json_path)
+                        _, resultado.parrafos = procesador.renombrar_hablantes(resultado.json_path, mapa)
+                        _recordar_personas(mapa.values())
+            except (KeyboardInterrupt, EOFError):
+                if desde_menu:
+                    consola.print("\n[yellow]Nombres sin terminar.[/] Puedes terminarlo luego en «Cambiar nombres de hablantes».")
+                else:
+                    consola.print("\n[yellow]Nombres sin terminar.[/] Puedes retomarlo luego con [cyan]transcriptor nombres -e[/].")
 
-        _ofrecer_revision_dudosas(resultado, desde_menu)
+            _ofrecer_revision_dudosas(resultado)
+    except Exception as e:
+        _mostrar_error(e, detalle)
 
     _mostrar_resumen(resultado, time.monotonic() - inicio, desde_menu)
     _anotar_en_historial(resultado)
@@ -270,7 +292,7 @@ def poner_nombres(
 
     archivo = archivo.expanduser()
     if archivo.suffix != ".json" or not archivo.exists():
-        raise typer.BadParameter(f"No encuentro el archivo .json: {archivo}", param_hint="ARCHIVO")
+        raise typer.BadParameter(f"No encuentro el archivo .json: {_limpio(archivo)}", param_hint="ARCHIVO")
     if escuchar and lista:
         raise typer.BadParameter("Usa una lista de nombres o --escuchar, no los dos a la vez.", param_hint="LISTA")
     if escuchar and not _es_interactivo():
@@ -278,7 +300,7 @@ def poner_nombres(
     try:
         mapa_nombres = parsear_nombres(lista)
     except ValueError as e:
-        raise typer.BadParameter(str(e).replace("En --nombres, ", ""), param_hint="LISTA") from None
+        raise typer.BadParameter(_limpio(str(e).replace("En --nombres, ", "")), param_hint="LISTA") from None
 
     from src import procesador
 
@@ -293,21 +315,21 @@ def poner_nombres(
             _guardar_voces_del_json(archivo, procesador)
     except (KeyboardInterrupt, EOFError):
         consola_err.print("\n[yellow]Cancelado. No se cambió nada.[/]")
-        raise typer.Exit(130)
+        raise typer.Exit(130) from None
     except json.JSONDecodeError as e:
         _mostrar_error(ValueError(
             f"El archivo no es un JSON válido (línea {e.lineno}, columna {e.colno}). "
             "Revisa que no falte una coma o unas comillas cerca de ahí."), detalle=False)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     except Exception as e:
         _mostrar_error(e, detalle=False)
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     tabla = Table.grid(padding=(0, 2))
     tabla.add_column(style="bold")
     tabla.add_column(overflow="fold")
-    tabla.add_row("Transcripción", str(txt_path))
-    tabla.add_row("Hablantes", _texto_hablantes(parrafos))
+    tabla.add_row("Transcripción", Text(_limpio(txt_path)))
+    tabla.add_row("Hablantes", Text(_limpio(_texto_hablantes(parrafos))))
     titulo = "Nombres aplicados" if mapa_nombres or escuchar else "Transcripción actualizada desde el .json"
     consola.print(Panel(tabla, title=titulo, title_align="left", border_style="green", expand=False))
     return txt_path
@@ -319,7 +341,23 @@ def _anotar_en_historial(resultado):
         from src import historial
         historial.registrar(resultado.txt_path, resultado.json_path, resultado.audio_path, resultado.duracion)
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudo anotar en el historial: {e}")
+        logger.debug(f"No se pudo anotar en el historial: {e}")
+
+
+# Caracteres de control (menos tabulador y salto de línea). Un nombre de archivo o un texto transcrito
+# con ESC podría mover el cursor, cambiar el título de la ventana o pintar la pantalla de la terminal.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _limpio(texto) -> str:
+    """Texto del usuario o de un archivo sin caracteres de control, para mostrarlo en pantalla."""
+    return _CONTROL.sub("", str(texto))
+
+
+def _marcado(texto) -> str:
+    """Para meter texto del usuario o de un archivo en una cadena con marcado de Rich: sin control y con
+    los corchetes escapados (un `[/]` en un nombre rompería la pantalla con MarkupError)."""
+    return escape(_limpio(texto))
 
 
 def _es_interactivo() -> bool:
@@ -333,7 +371,7 @@ def _recordar_personas(nombres):
         from src import historial
         historial.recordar_personas(list(nombres))
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudieron recordar las personas: {e}")
+        logger.debug(f"No se pudieron recordar las personas: {e}")
 
 
 def _reconocer_voces_activo() -> bool:
@@ -342,7 +380,7 @@ def _reconocer_voces_activo() -> bool:
         from src import ajustes
         return bool(ajustes.valor("reconocer_voces"))
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudo leer el ajuste de reconocer voces: {e}")
+        logger.debug(f"No se pudo leer el ajuste de reconocer voces: {e}")
         return False
 
 
@@ -366,10 +404,10 @@ def _sugerir_por_voz(huellas: Optional[dict], nombres_actuales: dict, parrafos: 
         if sugerencias:
             # En el orden en que aparecen en la charla
             nombres = [sugerencias[e] for e in _hablantes_en_orden(parrafos) if e in sugerencias]
-            consola.print(f"[dim]Reconocí por la voz a: {', '.join(nombres)}. Confírmalo al escuchar a cada uno.[/]")
+            consola.print(f"[dim]Reconocí por la voz a: {_marcado(', '.join(nombres))}. Confírmalo al escuchar a cada uno.[/]")
         return sugerencias
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudo reconocer por la voz: {e}")
+        logger.debug(f"No se pudo reconocer por la voz: {e}")
         return {}
 
 
@@ -387,7 +425,7 @@ def _guardar_voces(nombres: dict, huellas: Optional[dict], json_path: Optional[P
         fuente = str(Path(json_path).expanduser().resolve()) if json_path else None
         voces.recordar_nombrados(nombres, huellas, fuente)
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudieron guardar las voces: {e}")
+        logger.debug(f"No se pudieron guardar las voces: {e}")
 
 
 def _guardar_voces_del_json(json_path: Path, procesador):
@@ -399,7 +437,7 @@ def _guardar_voces_del_json(json_path: Path, procesador):
         datos = procesador.leer_transcripcion(json_path)
         _guardar_voces(datos["nombres"], datos["huellas"], json_path)
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudieron guardar las voces: {e}")
+        logger.debug(f"No se pudieron guardar las voces: {e}")
 
 
 def _quiere_poner_nombres(menu, cuantos: int) -> bool:
@@ -481,14 +519,14 @@ def _escuchar_y_nombrar(parrafos: list, nombres_actuales: dict, audio: Optional[
     def nombre_de(etiqueta):
         return mapa.get(etiqueta, nombres_actuales.get(etiqueta, etiqueta))
 
-    with tempfile.TemporaryDirectory(prefix="transcriptor-") as carpeta:
+    with tempfile.TemporaryDirectory(prefix="transcriptor-", ignore_cleanup_errors=True) as carpeta:
         try:
             for posicion, etiqueta in enumerate(etiquetas):
                 actual = nombre_de(etiqueta)
                 opciones = fragmentos.elegir_fragmentos(parrafos, etiqueta)
                 anteriores = etiquetas[:posicion]
                 consola.print()
-                consola.rule(f"[bold]{actual}[/] · habla el {round(100 * tiempos[etiqueta] / total)} % del tiempo",
+                consola.rule(f"[bold]{_marcado(actual)}[/] · habla el {round(100 * tiempos[etiqueta] / total)} % del tiempo",
                              align="left")
                 indice, mostrar = 0, True
                 while True:
@@ -497,7 +535,7 @@ def _escuchar_y_nombrar(parrafos: list, nombres_actuales: dict, audio: Optional[
                         texto = fragmento["text"].strip()
                         if len(texto) > 280:
                             texto = texto[:280].rsplit(" ", 1)[0] + "…"
-                        consola.print(f"[dim][{_reloj(fragmento['start'])}][/] {texto}")
+                        consola.print(f"[dim][{formato_reloj(fragmento['start'])}][/] {_marcado(texto)}")
                         if reproductor:
                             _reproducir_fragmento(reproductor, audio, fragmento, Path(carpeta) / f"{etiqueta}-{indice}.wav")
                     mostrar = True
@@ -548,15 +586,38 @@ def _escuchar_y_nombrar(parrafos: list, nombres_actuales: dict, audio: Optional[
                             mostrar = False
                             continue
 
-                    if reproductor:
-                        reproductor.detener()
+                    _detener_y_esperar(reproductor)
                     if nuevo and nuevo != actual:
                         mapa[etiqueta] = nuevo
                     break
         finally:
-            if reproductor:
-                reproductor.detener()
+            # Antes de salir del `with`: en Windows no se puede borrar un .wav que sigue abierto
+            _detener_y_esperar(reproductor)
     return mapa
+
+
+def _detener_y_esperar(reproductor):
+    """
+    Detiene el reproductor Y espera a que el proceso termine de verdad. Reproductor.detener() solo pide
+    terminar; en Windows, mientras el proceso siga vivo el .wav está abierto y no se puede borrar la
+    carpeta temporal (PermissionError). Si no obedece a tiempo, se mata. Nunca lanza.
+    """
+    if not reproductor:
+        return
+    proceso = getattr(reproductor, "proceso", None)
+    reproductor.detener()
+    if proceso is None:
+        return
+    try:
+        proceso.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            proceso.kill()
+            proceso.wait(timeout=2)
+        except Exception as e:
+            logger.debug(f"No se pudo detener el reproductor: {e}")
+    except Exception as e:
+        logger.debug(f"No se pudo esperar al reproductor: {e}")
 
 
 def _reproducir_fragmento(reproductor, audio: Path, fragmento: dict, destino: Path):
@@ -567,7 +628,7 @@ def _reproducir_fragmento(reproductor, audio: Path, fragmento: dict, destino: Pa
             fragmentos.extraer_fragmento(audio, fragmento["start"], duracion, destino)
         reproductor.reproducir(destino)
     except Exception as e:
-        consola.print(f"[yellow]No se pudo reproducir el fragmento ({e}).[/]")
+        consola.print(f"[yellow]No se pudo reproducir el fragmento ({_marcado(e)}).[/]")
 
 
 
@@ -583,11 +644,11 @@ def _contar_dudosas(json_path) -> int:
         datos = cargar_transcripcion(Path(json_path))
         return len(dudosas.buscar_dudosas(datos["parrafos"], nombres=datos["nombres"]))
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudieron contar las frases dudosas: {e}")
+        logger.debug(f"No se pudieron contar las frases dudosas: {e}")
         return 0
 
 
-def _ofrecer_revision_dudosas(resultado, desde_menu: bool = False):
+def _ofrecer_revision_dudosas(resultado):
     """
     Al terminar de transcribir (solo con una persona delante): ofrece revisar las frases en las que
     se dudó de quién habla. Un fallo aquí nunca debe estropear una transcripción ya hecha.
@@ -612,7 +673,7 @@ def _ofrecer_revision_dudosas(resultado, desde_menu: bool = False):
     except (KeyboardInterrupt, EOFError):
         consola.print("\n[yellow]Revisión sin terminar.[/] Puedes retomarla luego desde la transcripción.")
     except Exception as e:
-        logging.getLogger(__name__).debug(f"No se pudo ofrecer la revisión de frases dudosas: {e}")
+        logger.debug(f"No se pudo ofrecer la revisión de frases dudosas: {e}")
 
 
 def _recortar_final(texto: str, largo: int = 120) -> str:
@@ -632,14 +693,14 @@ def _mostrar_dudosa(parrafos: list, d, nombres: dict, posicion: int, total: int)
     from src import dudosas
 
     def nombre(etiqueta):
-        return dudosas.nombre_visible(etiqueta, nombres)
+        return _limpio(dudosas.nombre_visible(etiqueta, nombres))
 
     consola.print()
-    consola.rule(f"[bold]Frase {posicion} de {total}[/] · [{_reloj(d.start)}]", align="left")
+    consola.rule(f"[bold]Frase {posicion} de {total}[/] · [{formato_reloj(d.start)}]", align="left")
     if d.indice > 0:
         antes = parrafos[d.indice - 1]
-        consola.print(Text(f"{nombre(antes.get('speaker') or '')}: {_recortar_final(antes.get('text', ''))}", style="dim"))
-    texto = " ".join((parrafos[d.indice].get("text") or "").split())
+        consola.print(Text(f"{nombre(antes.get('speaker') or '')}: {_limpio(_recortar_final(antes.get('text', '')))}", style="dim"))
+    texto = _limpio(" ".join((parrafos[d.indice].get("text") or "").split()))
     # La misma posición que usará mover_frase (palabras enteras; si se repite, la de su minuto)
     pos = dudosas.posicion_en_parrafo(parrafos[d.indice], d)
     linea = Text(f"{nombre(d.actual)}: ", style="bold cyan")
@@ -647,12 +708,12 @@ def _mostrar_dudosa(parrafos: list, d, nombres: dict, posicion: int, total: int)
         linea.append(texto)
     else:
         linea.append(texto[:pos])
-        linea.append(d.texto, style="bold yellow")
+        linea.append(_limpio(d.texto), style="bold yellow")
         linea.append(texto[pos + len(d.texto):])
     consola.print(linea)
     if d.indice + 1 < len(parrafos):
         despues = parrafos[d.indice + 1]
-        consola.print(Text(f"{nombre(despues.get('speaker') or '')}: {_recortar_inicio(despues.get('text', ''))}", style="dim"))
+        consola.print(Text(f"{nombre(despues.get('speaker') or '')}: {_limpio(_recortar_inicio(despues.get('text', '')))}", style="dim"))
     consola.print()
 
 
@@ -679,8 +740,8 @@ def _revisar_dudosas(json_path: Path, menu) -> int:
     def clave(d):
         return (d.texto, round(d.start, 2), d.otro)
 
-    try:
-        with tempfile.TemporaryDirectory(prefix="transcriptor-") as carpeta:
+    with tempfile.TemporaryDirectory(prefix="transcriptor-", ignore_cleanup_errors=True) as carpeta:
+        try:
             while True:
                 # Se recalcula cada vez: al mover una frase los índices de los párrafos cambian
                 pendientes = [d for d in dudosas.buscar_dudosas(parrafos, nombres=nombres) if clave(d) not in omitidas]
@@ -732,11 +793,11 @@ def _revisar_dudosas(json_path: Path, menu) -> int:
                 if nuevos == parrafos:
                     omitidas.add(clave(d))
                 parrafos = nuevos
-    except (KeyboardInterrupt, EOFError):
-        consola.print("\n[dim]Revisión interrumpida: guardo lo que llevabas.[/]")
-    finally:
-        if reproductor:
-            reproductor.detener()
+        except (KeyboardInterrupt, EOFError):
+            consola.print("\n[dim]Revisión interrumpida: guardo lo que llevabas.[/]")
+        finally:
+            # Dentro del `with`: el reproductor debe haber soltado el .wav antes de borrar la carpeta
+            _detener_y_esperar(reproductor)
 
     # Sin cambios ni marcas (se terminó de inmediato) no hay nada que guardar
     if not cambiadas and parrafos == datos["parrafos"]:
@@ -775,14 +836,14 @@ class _ColumnaDetalle(ProgressColumn):
         texto = Text(style="dim")
         unidad = task.fields.get("unidad")
         if task.total is not None and unidad == "audio":
-            texto.append(f"{_reloj(task.completed)} / {_reloj(task.total)}")
+            texto.append(f"{formato_reloj(task.completed)} / {formato_reloj(task.total)}")
         elif task.total is not None and unidad == "bytes":
             texto.append(f"{task.completed / 1e6:.1f} / {task.total / 1e6:.1f} MB")
         elif task.total is not None and unidad == "párrafos":
             texto.append(f"{int(task.completed)} / {int(task.total)} párrafos")
         restante = task.time_remaining
         if not task.finished and task.total is not None and restante is not None:
-            texto.append(("  " if texto else "") + f"quedan {_duracion(restante)}", style="yellow")
+            texto.append(("  " if texto else "") + f"quedan {formato_duracion(restante)}", style="yellow")
         return texto
 
 
@@ -825,7 +886,7 @@ class _Pasos:
     def fallar(self, motivo: str):
         """Marca el paso actual con ✗ sin detener el proceso (el motivo se muestra en el resumen)."""
         if not self.animado:
-            self.consola.print(f"[bold red]✗ {motivo}[/]")
+            self.consola.print(f"[bold red]✗ {_marcado(motivo)}[/]")
             return
         self._cerrar_paso(fallo=True)
 
@@ -874,7 +935,7 @@ def _mostrar_error(e: Exception, detalle: bool):
     global ultimo_error
     if detalle:
         consola_err.print_exception()
-    mensaje = Text(errores.mensaje_simple(e) or str(e) or type(e).__name__)
+    mensaje = Text(_limpio(errores.mensaje_simple(e) or str(e) or type(e).__name__))
     if _falta_modelo_sin_internet(e):  # tiene prioridad: la causa real es el modo «Sin internet»
         mensaje = Text("Está activado «Sin internet» y ese modelo todavía no está descargado. "
                        "Desactívalo en Configuración (o quita HF_HUB_OFFLINE del .env) para descargarlo.")
@@ -901,18 +962,18 @@ def _mostrar_resumen(resultado, segundos: float, desde_menu: bool = False):
     tabla = Table.grid(padding=(0, 2))
     tabla.add_column(style="bold")
     tabla.add_column(overflow="fold")
-    tabla.add_row("Transcripción", str(resultado.txt_path))
-    tabla.add_row("Audio", _duracion(resultado.duracion))
+    tabla.add_row("Transcripción", Text(_limpio(resultado.txt_path)))
+    tabla.add_row("Audio", formato_duracion(resultado.duracion))
     if resultado.error_hablantes:
         tabla.add_row("Hablantes", Text(
-            f"no se pudieron identificar ({resultado.error_hablantes}). "
+            f"no se pudieron identificar ({_limpio(resultado.error_hablantes)}). "
             "La transcripción se guardó sin ellos.", style="yellow"))
     elif resultado.json_path:
-        tabla.add_row("Hablantes", _texto_hablantes(resultado.parrafos))
-    tabla.add_row("Tiempo total", _duracion(segundos))
+        tabla.add_row("Hablantes", Text(_limpio(_texto_hablantes(resultado.parrafos))))
+    tabla.add_row("Tiempo total", formato_duracion(segundos))
     if resultado.json_path and not desde_menu:
         tabla.add_row("", "")
-        tabla.add_row("Cambiar nombres", f'transcriptor nombres "{resultado.json_path}" -e')
+        tabla.add_row("Cambiar nombres", Text(_limpio(f'transcriptor nombres "{resultado.json_path}" -e')))
 
     consola.print()
     if resultado.error_hablantes:
@@ -936,33 +997,13 @@ def _texto_hablantes(parrafos: list) -> str:
     return ", ".join(f"{nombre} ({round(100 * t / total)} %)" for nombre, t in tiempos.items())
 
 
-def _reloj(segundos: float) -> str:
-    """Convierte segundos a '42:10' o '1:02:05'."""
-    segundos = int(segundos)
-    h, resto = divmod(segundos, 3600)
-    m, s = divmod(resto, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
-
-
-def _duracion(segundos: float) -> str:
-    """Convierte segundos a un texto corto: '3 s', '1 min 48 s', '1 h 02 min'."""
-    segundos = int(round(segundos))
-    h, resto = divmod(segundos, 3600)
-    m, s = divmod(resto, 60)
-    if h:
-        return f"{h} h {m:02d} min"
-    if m:
-        return f"{m} min {s:02d} s"
-    return f"{s} s"
-
-
 # ---------------------------------------------------------------------------
 # Clic derecho: «Transcribir con Transcriptor» (comando oculto, ver src/clic_derecho.py)
 # ---------------------------------------------------------------------------
 def _hablantes_para_clic_derecho() -> bool:
     """Con hablantes si Configuración no dice «nunca» y se puede: disponible aquí, pyannote instalado y con clave."""
     import importlib.util
-    from src import ajustes, config, plataforma
+    from src import ajustes, config
 
     if ajustes.valor("modo_hablantes") == ajustes.NUNCA:
         return False
@@ -979,24 +1020,43 @@ def en_fila(
     archivos: Annotated[list[Path], typer.Argument(metavar="ARCHIVO...", show_default=False,
                                                    help="Audios o videos a transcribir, uno tras otro.")],
 ):
-    """Lo llama el clic derecho: transcribe los archivos uno tras otro, sin preguntas, y avisa al terminar cada uno."""
+    """
+    Lo llama el clic derecho: transcribe los archivos uno tras otro con lo de Configuración.
+    Abre su propia ventana de terminal: se ve el avance y, al terminar cada uno, se ofrece poner
+    nombres y revisar frases dudosas, como desde el menú. Sin terminal (scripts), no pregunta nada
+    y avisa cada resultado con una notificación.
+    """
     from src import ajustes, clic_derecho
 
-    # Nadie mira la terminal: cada resultado se avisa con una notificación
+    con_persona = _es_interactivo()
     algun_fallo = False
-    candado = clic_derecho.tomar_candado(
-        al_esperar=lambda: consola.print("[yellow]Hay otra transcripción en curso: espero mi turno…[/]"))
+    interrumpido = False
+    # El candado cubre solo lo pesado de cada archivo (transcribir y diarizar): se suelta antes de las
+    # preguntas de nombres y frases dudosas. Si no, una persona que se va sin responder dejaría a los
+    # demás clics derechos esperando para siempre.
+    candado = []  # lista de 0 o 1 ruta: así la puede soltar la función de abajo
+
+    def soltar():
+        while candado:
+            clic_derecho.soltar_candado(candado.pop())
+
     try:
+        validos = []
         for archivo in archivos:
             if not archivo.is_file():
-                consola_err.print(f"[yellow]Salto {escape(archivo.name or str(archivo))}: no encuentro el archivo.[/]")
-                continue
-            if not clic_derecho.es_audio_o_video(archivo):
-                consola_err.print(f"[yellow]Salto {escape(archivo.name)}: no parece un audio ni un video.[/]")
-                continue
+                consola_err.print(f"[yellow]Salto {_marcado(archivo.name or str(archivo))}: no encuentro el archivo.[/]")
+            elif not clic_derecho.es_audio_o_video(archivo):
+                consola_err.print(f"[yellow]Salto {_marcado(archivo.name)}: no parece un audio ni un video.[/]")
+            else:
+                validos.append(archivo)
 
+        for numero, archivo in enumerate(validos, start=1):
+            if len(validos) > 1:
+                consola.print(f"\n[bold]Archivo {numero} de {len(validos)}:[/] {_marcado(archivo.name)}")
             from src import menu  # importación diferida: solo para fecha_de_grabacion
             try:
+                candado.append(clic_derecho.tomar_candado(
+                    al_esperar=lambda: consola.print("[yellow]Hay otra transcripción en curso: espero mi turno…[/]")))
                 resultado = ejecutar_transcripcion(
                     str(archivo),
                     ajustes.valor("modelo"),
@@ -1004,17 +1064,46 @@ def en_fila(
                     idioma=ajustes.valor("idioma"),
                     salida=ajustes.carpeta("carpeta_salida"),
                     carpeta_descargas=ajustes.carpeta("carpeta_descargas"),
-                    sin_preguntas=True,
+                    # Con alguien en la ventana: nombres, dudosas y aviso al terminar, como en el menú
+                    sin_preguntas=not con_persona,
                     desde_menu=True,
                     titulo=archivo.stem,
                     fecha=menu.fecha_de_grabacion(str(archivo)),
+                    al_terminar_trabajo=soltar,
                 )
-            except (typer.Exit, Exception):  # el detalle ya lo guardó _mostrar_error
+            except KeyboardInterrupt:
+                interrumpido = True
+                break
+            except typer.Exit as salida:
+                # Ctrl+C (ejecutar_transcripcion ya dijo «Cancelado») no es un fallo: se detiene toda la fila
+                if salida.exit_code == 130:
+                    interrumpido = True
+                    break
                 algun_fallo = True
                 aviso.notificar("No pude transcribir", f"{archivo.name}. Abre Transcriptor para ver el detalle.")
                 continue
-            aviso.notificar("Transcripción lista", f"Listo: {archivo.stem}, {_duracion(resultado.duracion or 0)}")
+            except Exception:  # el detalle ya lo guardó _mostrar_error
+                algun_fallo = True
+                aviso.notificar("No pude transcribir", f"{archivo.name}. Abre Transcriptor para ver el detalle.")
+                continue
+            finally:
+                soltar()
+            if not con_persona:  # con alguien delante, ejecutar_transcripcion ya avisa si tardó
+                aviso.notificar("Transcripción lista", f"Listo: {archivo.stem}, {formato_duracion(resultado.duracion or 0)}")
+    except KeyboardInterrupt:  # Ctrl+C mientras esperaba el candado o entre archivos
+        interrumpido = True
     finally:
-        clic_derecho.soltar_candado(candado)
+        soltar()
 
+    if interrumpido:
+        raise typer.Exit(130)
+
+    if con_persona:
+        consola.print("\n[bold]Listo.[/] Ya puedes cerrar esta ventana.")
+        if plataforma.es_windows():
+            # La ventana de «Enviar a» se cierra sola al terminar: que se alcance a leer el resumen
+            try:
+                input("Pulsa Enter para cerrarla.")
+            except (EOFError, KeyboardInterrupt):
+                pass
     raise typer.Exit(1 if algun_fallo else 0)

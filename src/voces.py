@@ -38,7 +38,7 @@ _ETIQUETA_SIN_NOMBRE = re.compile(rf"^{ETIQUETA_GENERICA} \d+$")
 def _cargar() -> dict:
     """Las voces guardadas {nombre: {"huella": [...], "veces": int, "actualizada": float}}.
     Si el archivo falta o está dañado, no hay voces; las entradas estropeadas se ignoran."""
-    datos = historial._leer(ARCHIVO_VOCES, {})
+    datos = historial.leer(ARCHIVO_VOCES, {})
     voces = {}
     for nombre, entrada in datos.items():
         if not isinstance(entrada, dict):
@@ -101,7 +101,7 @@ def recordar(nombre: str, huella: list, origen: Optional[str] = None) -> bool:
         "actualizada": time.time(),
         "origenes": origenes,
     }
-    historial._escribir(ARCHIVO_VOCES, voces)
+    historial.guardar(ARCHIVO_VOCES, voces)
     return True
 
 
@@ -135,7 +135,7 @@ def quitar_origen(origen: str, huella: list, salvo: Optional[str] = None) -> lis
         voz["origenes"] = [o for o in voz["origenes"] if o != origen]
         voz["actualizada"] = time.time()
     if corregidos:
-        historial._escribir(ARCHIVO_VOCES, voces)
+        historial.guardar(ARCHIVO_VOCES, voces)
     return corregidos
 
 
@@ -194,14 +194,14 @@ def conocidas() -> list:
 
 def olvidar(nombre: str) -> bool:
     """Borra la huella de una persona. Retorna False si no estaba."""
-    voces = historial._leer(ARCHIVO_VOCES, {})
+    voces = historial.leer(ARCHIVO_VOCES, {})
     if nombre not in voces:
         return False
     del voces[nombre]
-    historial._escribir(ARCHIVO_VOCES, voces)
+    historial.guardar(ARCHIVO_VOCES, voces)
     return True
 
 
 def olvidar_todas():
     """Borra todas las huellas guardadas."""
-    historial._escribir(ARCHIVO_VOCES, {})
+    historial.guardar(ARCHIVO_VOCES, {})

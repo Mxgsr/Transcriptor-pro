@@ -1,14 +1,17 @@
 # Ubicación: src/historial.py
 # Lo que el programa recuerda entre usos: las transcripciones hechas (para "Mis transcripciones"
 # del menú) y lo último que elegiste en el menú (modelo, hablantes...), para ofrecerlo por defecto.
-# Vive en ~/.transcriptor/ (o en la carpeta que diga TRANSCRIPTOR_HOME).
-import json
+# Vive en ~/.transcriptor/ (o en la carpeta que diga TRANSCRIPTOR_HOME). Esa carpeta y lo que se guarda
+# en ella son privados (0700/0600): hay huellas de voz, nombres y transcripciones de reuniones.
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+from utils.archivos import crear_carpeta_privada, escribir_json, leer_json  # noqa: F401  (leer_json se reexporta)
 
 logger = logging.getLogger(__name__)
 
@@ -24,25 +27,36 @@ def carpeta() -> Path:
     return Path(os.getenv("TRANSCRIPTOR_HOME", "~/.transcriptor")).expanduser()
 
 
+def carpeta_privada(subcarpeta: Optional[str] = None) -> Path:
+    """La carpeta de datos (o una subcarpeta suya, p. ej. "vistas") creada solo para este usuario (0700).
+    carpeta() solo dice dónde está, sin crearla; quien va a escribir ahí usa esta. Lanza OSError si no
+    se puede crear."""
+    ruta = crear_carpeta_privada(carpeta())
+    return crear_carpeta_privada(ruta / subcarpeta) if subcarpeta else ruta
+
+
+# Leer-modificar-escribir de preferencias desde varios hilos (p. ej. la búsqueda de actualizaciones
+# en segundo plano y el menú): sin esto, uno puede pisar lo que el otro acaba de guardar.
+_candado = threading.RLock()
+
+
 def _leer(nombre: str, defecto):
-    """Si el archivo no existe o está dañado, se empieza de cero: nunca debe impedir usar el programa."""
-    try:
-        datos = json.loads((carpeta() / nombre).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return defecto
+    """Si el archivo no existe o está dañado, se empieza de cero: nunca debe impedir usar el programa.
+    Uno dañado se aparta como «.corrupto» (ver utils.archivos.leer_json) para no perder lo recuperable."""
+    datos = leer_json(carpeta() / nombre, defecto)
     return datos if isinstance(datos, type(defecto)) else defecto
 
 
 def _escribir(nombre: str, datos):
     try:
-        carpeta().mkdir(parents=True, exist_ok=True)
-        destino = carpeta() / nombre
-        # Escribimos aparte y reemplazamos, para no dejar el archivo a medias si algo falla
-        temporal = destino.with_name(destino.name + ".tmp")
-        temporal.write_text(json.dumps(datos, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporal.replace(destino)
+        escribir_json(carpeta_privada() / nombre, datos, privado=True)
     except OSError as e:
         logger.warning(f"No se pudo guardar {nombre} en {carpeta()}: {e}")
+
+
+# Versiones públicas para otros módulos (voces.py), que no deben llamar a las privadas
+leer = _leer
+guardar = _escribir
 
 
 def registrar(txt_path: Path, json_path: Optional[Path] = None, audio_path: Optional[Path] = None,
@@ -91,7 +105,8 @@ def preferencias() -> dict:
 
 
 def guardar_preferencias(**cambios):
-    _escribir(ARCHIVO_PREFERENCIAS, {**preferencias(), **cambios})
+    with _candado:
+        _escribir(ARCHIVO_PREFERENCIAS, {**preferencias(), **cambios})
 
 
 def _es_nombre_de_persona(nombre) -> bool:

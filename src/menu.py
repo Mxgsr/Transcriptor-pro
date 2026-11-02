@@ -3,10 +3,7 @@
 # Aquí solo se hacen preguntas: el trabajo lo hacen los mismos comandos de src/cli.py.
 import importlib.util
 import logging
-import os
 import re
-import shutil
-import subprocess
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,12 +17,14 @@ from rich.panel import Panel
 from rich.progress import BarColumn, DownloadColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.text import Text
 
-from src import actualizar, ajustes, aviso, buscar, cli, clic_derecho, historial, modelos, plataforma, vista, voces
+from src import actualizar, ajustes, aviso, buscar, cli, clic_derecho, historial, modelos, plataforma, sistema, vista, voces
 from src.diarizer import parsear_nombres
-from utils.formatters import a_fecha
-from utils.validators import es_url
+from src.sistema import abrir
+from utils.formatters import MESES_COMPLETOS, a_fecha, formato_duracion
+from utils.validators import es_url, limpiar_ruta
 
 consola = cli.consola
+logger = logging.getLogger(__name__)
 
 # Los mismos colores que las barras de progreso
 ESTILO = questionary.Style([
@@ -40,7 +39,7 @@ ESTILO = questionary.Style([
 ])
 
 MODELOS_WHISPER = [
-    ("turbo", "rápido y casi tan preciso como large (recomendado)"),
+    ("turbo", "rápido y casi tan preciso como large"),
     ("large", "el más preciso, el más lento"),
     ("medium", "equilibrado"),
     ("small", "rápido, para pruebas"),
@@ -67,7 +66,8 @@ OPCIONES_HABLANTES = [
     ("Sí, 5 o más", "5 o más"),
 ]
 
-MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+# Abreviados: las tres primeras letras de cada mes (ene, feb... sep, dic), derivados de la lista completa
+MESES = [mes[:3] for mes in MESES_COMPLETOS]
 
 # Cuántas transcripciones se ofrecen en las listas (las más recientes); «Ver más antiguas…» muestra las siguientes
 MAX_EN_LISTA = 15
@@ -234,7 +234,8 @@ def iniciar():
 def _necesita_preparacion() -> bool:
     try:
         return modelos.necesita_preparacion()
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         return False
 
 
@@ -246,7 +247,8 @@ def _avisar_version_nueva():
         if novedad:
             consola.print(f" [dim]Hay una versión nueva ({escape(novedad.version)}). "
                           "Puedes instalarla en Configuración › Buscar actualizaciones.[/]\n")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         pass
 
 
@@ -366,7 +368,7 @@ def fecha_de_grabacion(entrada: str) -> date:
         return date.today()
     # En Linux st_ctime es el último cambio de datos, no la creación; la modificación ya lo cubre
     creacion = getattr(info, "st_birthtime", None)
-    if creacion is None and sys.platform == "win32":
+    if creacion is None and plataforma.es_windows():
         creacion = info.st_ctime
     momentos = [m for m in (creacion, info.st_mtime) if m]
     return datetime.fromtimestamp(min(momentos)).date() if momentos else date.today()
@@ -389,7 +391,8 @@ def _falta_descargar(modelo: str) -> bool:
     """True si el modelo de transcripción todavía no está en este computador (si no se sabe, False)."""
     try:
         return not modelos.descargado(modelo)
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         return False
 
 
@@ -406,7 +409,8 @@ def _resolver_faltantes_sin_internet(modelo: str, hablantes: bool) -> bool:
             faltan.append((modelo, f"el modelo {modelo}"))
         if hablantes and plataforma.hablantes_disponible() and not modelos.descargado(modelos.HABLANTES):
             faltan.append((modelos.HABLANTES, "el modelo para identificar hablantes"))
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         return True
     if not faltan:
         return True
@@ -624,7 +628,8 @@ def _elegir_ajuste(mensaje: str, salida: Optional[Path]) -> str:
 def _version() -> str:
     try:
         return actualizar.version_instalada()
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         return "?"
 
 
@@ -645,7 +650,8 @@ def _entrada_voces_guardadas() -> list:
     """«Voces guardadas: N» solo si hay alguna (si no, no hay nada que olvidar)."""
     try:
         cuantas = len(voces.conocidas())
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         return []
     return [(f"Voces guardadas: {cuantas}", "voces_guardadas")] if cuantas else []
 
@@ -665,7 +671,7 @@ def _gestionar_voces_guardadas():
             continue
         if si_no(f"¿Olvido la voz de {eleccion}?", defecto=False):
             voces.olvidar(eleccion)
-            consola.print(f"[green]✓[/] Olvidé la voz de {eleccion}.")
+            consola.print(f"[green]✓[/] Olvidé la voz de {escape(str(eleccion))}.")
 
 
 def _cambiar_ajuste(clave: str):
@@ -763,10 +769,7 @@ def _descargar_modelo(clave: str) -> bool:
 
 
 def _abrir_pagina(url: str):
-    try:
-        import webbrowser
-        webbrowser.open(url)
-    except Exception:
+    if not sistema.abrir_pagina(url):
         consola.print(f"Ábrela en tu navegador: [cyan]{url}[/]")
 
 
@@ -879,7 +882,7 @@ def _eliminar_desde_lista(m, usado: str):
     try:
         modelos.eliminar(m.clave)
     except Exception as e:
-        logging.getLogger(__name__).warning(f"No se pudo eliminar el modelo {m.clave}: {e}")
+        logger.warning(f"No se pudo eliminar el modelo {m.clave}: {e}")
         _avisar("No pude eliminar el modelo.")
         return
     consola.print(f"[green]✓[/] Eliminé {m.nombre} (liberé {liberado}).")
@@ -943,7 +946,7 @@ def _buscar_actualizaciones() -> bool:
         _avisar("No pude revisar: no hay conexión a internet.")
         return False
     except Exception as e:
-        logging.getLogger(__name__).warning(f"No se pudo buscar actualizaciones: {e}")
+        logger.warning(f"No se pudo buscar actualizaciones: {e}")
         _avisar("No pude revisar si hay una versión nueva.")
         return False
     if novedad is None:
@@ -1076,13 +1079,14 @@ def leer_con_audio(txt: Path, json_path: Optional[Path], audio: Optional[Path] =
     try:
         ruta_vista = vista.crear_vista(txt, json_path, audio, ir_a=ir_a)
     except Exception as e:
-        logging.getLogger(__name__).warning(f"No se pudo crear la vista: {e}")
+        logger.warning(f"No se pudo crear la vista: {e}")
         _avisar("No pude preparar la lectura de esta transcripción.")
         return False
     try:
         if vista.datos_de_vista(txt, json_path, audio)["audio"] is None:
             consola.print("[yellow]No encuentro el audio: se verá sin audio.[/]")
-    except Exception:
+    except Exception as e:
+        logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
         pass
     if vista.abrir_en_navegador(ruta_vista):
         consola.print("[green]✓[/] La abrí en el navegador. Haz clic en un párrafo para escucharlo.")
@@ -1139,8 +1143,12 @@ def acciones_sobre(txt: Path, json_path: Optional[Path], mensaje: str, volver: b
 def copiar_transcripcion(txt: Path) -> bool:
     """Copia el contenido del .txt (con su encabezado, si lo tiene) al portapapeles."""
     try:
-        contenido = Path(txt).read_text(encoding="utf-8")
-    except OSError:
+        # utf-8-sig quita la marca BOM; un .txt guardado como ANSI (cp1252) se lee como tal para no perder las tildes
+        try:
+            contenido = Path(txt).read_text(encoding="utf-8-sig")
+        except UnicodeDecodeError:
+            contenido = Path(txt).read_text(encoding="cp1252", errors="replace")
+    except (OSError, ValueError):
         contenido = None
     if contenido is not None and aviso.copiar_al_portapapeles(contenido):
         consola.print("[green]✓[/] Copiada. Puedes pegarla en Claude para hacer la minuta.")
@@ -1167,10 +1175,11 @@ def etiquetas(entradas: list) -> list:
                 hablantes = [datos["nombres"].get(h, h) for h in etiquetas_hablantes]
                 if duracion is None and datos["parrafos"]:
                     duracion = max(p["end"] for p in datos["parrafos"])
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Error ignorado ({type(e).__name__}): {e}")
                 pass
         if duracion:
-            partes.append(cli._duracion(duracion))
+            partes.append(formato_duracion(duracion))
         if hablantes:
             partes.append(", ".join(hablantes) if len(hablantes) <= 3 else f"{len(hablantes)} hablantes")
         resultado.append(" · ".join(partes))
@@ -1187,24 +1196,6 @@ def cuando(fecha: float, ahora: Optional[datetime] = None) -> str:
         return f"ayer {momento:%H:%M}"
     texto = f"{momento.day} {MESES[momento.month - 1]}"
     return texto if momento.year == hoy.year else f"{texto} {momento.year}"
-
-
-def abrir(archivo: Path, revelar: bool = False):
-    """Abre el archivo con su programa (o muestra dónde está, con revelar)."""
-    if sys.platform == "darwin":
-        comando = ["open", "-R", str(archivo)] if revelar else ["open", str(archivo)]
-    elif sys.platform == "win32":
-        if not revelar:
-            os.startfile(str(archivo))
-            return
-        # explorer quiere la ruta pegada a /select, entre comillas (por los espacios)
-        comando = f'explorer /select,"{archivo}"'
-    elif shutil.which("xdg-open"):
-        comando = ["xdg-open", str(archivo.parent if revelar else archivo)]
-    else:
-        consola.print(f"Está en [cyan]{escape(str(archivo))}[/]")
-        return
-    subprocess.run(comando, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
 # --- Utilidades -------------------------------------------------------------
@@ -1240,8 +1231,8 @@ def _que_hago_con_el_error(archivo: Path):
         except Atras:
             return
         try:
-            contenido = Path(archivo).read_text(encoding="utf-8")
-        except OSError:
+            contenido = Path(archivo).read_text(encoding="utf-8-sig", errors="replace")
+        except (OSError, ValueError):
             _avisar(f"No pude leer el archivo del detalle. Debería estar en {cli.errores.ruta_corta(archivo)}")
             continue
         if decision == "ver":
@@ -1294,20 +1285,6 @@ def _txt_y_json(archivo: Path) -> tuple:
     archivo = Path(archivo)
     json_path = archivo.with_suffix(".json")
     return archivo.with_suffix(".txt"), json_path if json_path.exists() else None
-
-
-def limpiar_ruta(texto: str) -> Path:
-    """
-    Acepta rutas escritas o arrastradas a la terminal: "entre comillas" o con los espacios
-    escapados como hace la Terminal del Mac (Mi\\ audio.m4a).
-    En Windows la \\ separa carpetas (C:\\Users\\...), así que ahí no se toca.
-    """
-    texto = texto.strip()
-    if len(texto) >= 2 and texto[0] == texto[-1] and texto[0] in "'\"":
-        texto = texto[1:-1]
-    elif sys.platform != "win32":
-        texto = re.sub(r"\\(.)", r"\1", texto)
-    return Path(texto).expanduser()
 
 
 def _validar_archivo(texto: str):

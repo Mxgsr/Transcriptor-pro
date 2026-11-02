@@ -484,3 +484,72 @@ def test_preparar_no_pide_clave_si_nunca_identifica_hablantes(monkeypatch):
     monkeypatch.setattr(modelos, "token_guardado", lambda: None)
     ajustes.guardar(modo_hablantes=ajustes.NUNCA)
     assert not modelos.necesita_preparacion()
+
+
+# --- Permisos del .env: la clave nunca queda legible por otros, ni un instante ---
+
+solo_posix = pytest.mark.skipif(sys.platform == "win32", reason="en Windows no hay permisos POSIX")
+
+
+def _modo(ruta):
+    import os
+    import stat
+    return stat.S_IMODE(os.stat(ruta).st_mode)
+
+
+@solo_posix
+def test_guardar_token_nunca_crea_el_env_con_permisos_abiertos(historial_temporal, monkeypatch):
+    import os
+    monkeypatch.setattr(config, "HF_TOKEN", None)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    modos = []
+    real_open, real_chmod = os.open, os.chmod
+
+    def espia_open(ruta, flags, mode=0o777, *a, **k):
+        if flags & os.O_CREAT:
+            modos.append(("open", str(ruta), mode))
+        return real_open(ruta, flags, mode, *a, **k)
+
+    def espia_chmod(ruta, mode, *a, **k):
+        modos.append(("chmod", str(ruta), mode))
+        return real_chmod(ruta, mode, *a, **k)
+
+    monkeypatch.setattr(os, "open", espia_open)
+    monkeypatch.setattr(os, "chmod", espia_chmod)
+    anterior = os.umask(0o022)
+    try:
+        ruta = modelos.guardar_token("hf_secreto")
+    finally:
+        os.umask(anterior)
+    sobre_env = [m for m in modos if ".env" in m[1]]
+    assert any(m[0] == "open" for m in sobre_env)
+    assert all(m[2] & 0o077 == 0 for m in sobre_env), sobre_env
+    assert _modo(ruta) == 0o600
+    assert _modo(historial_temporal) == 0o700
+
+
+@solo_posix
+def test_guardar_token_cierra_un_env_que_estaba_abierto_y_conserva_lineas(historial_temporal, monkeypatch):
+    import os
+    monkeypatch.setattr(config, "HF_TOKEN", None)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    historial_temporal.mkdir(parents=True)
+    os.chmod(historial_temporal, 0o755)
+    env = historial_temporal / ".env"
+    env.write_text("A=1\nHF_TOKEN=viejo\n", encoding="utf-8")
+    os.chmod(env, 0o644)
+    modelos.guardar_token("hf_nuevo")
+    assert env.read_text(encoding="utf-8") == "A=1\nHF_TOKEN=hf_nuevo\n"
+    assert _modo(env) == 0o600
+    assert _modo(historial_temporal) == 0o700
+
+
+def test_guardar_token_en_windows_no_lanza(historial_temporal, monkeypatch):
+    from utils import archivos
+    monkeypatch.setattr(config, "HF_TOKEN", None)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(archivos, "_es_windows", lambda: True)
+    monkeypatch.delattr(archivos.os, "getuid", raising=False)
+    monkeypatch.setattr(archivos.os, "chmod", lambda *a, **k: None)
+    ruta = modelos.guardar_token("hf_w")
+    assert ruta.read_text(encoding="utf-8") == "HF_TOKEN=hf_w\n"

@@ -60,8 +60,18 @@ if (-not $TieneToken) {
     Paso "Identificar quién habla (opcional)"
     Write-Host "Necesita un token gratuito de Hugging Face: https://huggingface.co/settings/tokens"
     Write-Host "y aceptar las condiciones del modelo en: https://huggingface.co/pyannote/speaker-diarization-community-1"
-    $Token = Read-Host "Pega tu token (o Enter para saltarlo)"
-    if ($Token) {
+    Write-Host "Al pegarlo verás asteriscos (****): es normal, el token queda oculto. Luego aprieta Enter."
+    # -AsSecureString: el token no queda a la vista en la pantalla mientras se pega. Se convierte a
+    # texto con un BSTR que se borra de la memoria (ZeroFreeBSTR) apenas se lee. PtrToStringBSTR
+    # existe en Windows PowerShell 5.1 y en PowerShell 7.
+    $Seguro = Read-Host "Pega tu token (o Enter para saltarlo)" -AsSecureString
+    $Token = ""
+    if ($Seguro -and $Seguro.Length -gt 0) {
+        $Bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Seguro)
+        try { $Token = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr) }
+        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr) }
+    }
+    if ($Token.Trim()) {
         New-Item -ItemType Directory -Force -Path (Split-Path $Config) | Out-Null
         # Sin BOM: python-dotenv no leería bien la primera línea
         [System.IO.File]::AppendAllText($Config, "HF_TOKEN=$($Token.Trim())`n")

@@ -1,5 +1,10 @@
 # Ubicación: tests/test_historial.py
 import json
+import os
+import stat
+import sys
+
+import pytest
 
 from src import historial
 
@@ -137,3 +142,88 @@ def test_personas_con_contenido_raro_no_rompe(historial_temporal):
     assert historial.personas() == ["Luis"]
     historial.recordar_personas(["Luis"])
     assert historial.personas() == ["Luis"]
+
+
+def test_preferencias_danadas_se_apartan_y_se_empieza_de_cero():
+    ruta = historial.carpeta() / historial.ARCHIVO_PREFERENCIAS
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_text("{roto", encoding="utf-8")
+    assert historial.preferencias() == {}
+    historial.guardar_preferencias(modelo="small")
+    assert (historial.carpeta() / "preferencias.json.corrupto").read_text(encoding="utf-8") == "{roto"
+    assert historial.preferencias() == {"modelo": "small"}
+
+
+def test_preferencias_con_bom_se_leen():
+    ruta = historial.carpeta() / historial.ARCHIVO_PREFERENCIAS
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    ruta.write_bytes(b"\xef\xbb\xbf" + b'{"modelo": "tiny"}')
+    assert historial.preferencias() == {"modelo": "tiny"}
+
+
+def test_guardar_preferencias_desde_varios_hilos_no_pierde_claves():
+    import threading
+
+    hilos = [threading.Thread(target=historial.guardar_preferencias, kwargs={f"k{i}": i}) for i in range(20)]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join()
+    assert historial.preferencias() == {f"k{i}": i for i in range(20)}
+
+
+# --- Permisos: la carpeta de datos y lo que guarda son privados ------------------------------------
+
+solo_posix = pytest.mark.skipif(sys.platform == "win32", reason="en Windows no hay permisos POSIX")
+
+
+@pytest.fixture
+def umask_022():
+    anterior = os.umask(0o022)
+    yield
+    os.umask(anterior)
+
+
+def _modo(ruta):
+    return stat.S_IMODE(os.stat(ruta).st_mode)
+
+
+def _guardar_todo(tmp_path):
+    historial.registrar(_crear(tmp_path / "a.blocks.txt"))
+    historial.guardar_preferencias(modelo="small")
+    historial.recordar_personas(["Ana"])
+
+
+@solo_posix
+def test_historial_preferencias_y_personas_quedan_privados(tmp_path, umask_022):
+    _guardar_todo(tmp_path)
+    assert _modo(historial.carpeta()) == 0o700
+    for nombre in (historial.ARCHIVO_HISTORIAL, historial.ARCHIVO_PREFERENCIAS, historial.ARCHIVO_PERSONAS):
+        assert _modo(historial.carpeta() / nombre) == 0o600, nombre
+    # El .txt de la reunión, fuera de la carpeta de datos, no se toca
+    assert _modo(tmp_path / "a.blocks.txt") == 0o644
+
+
+@solo_posix
+def test_carpeta_de_datos_de_antes_se_aprieta(umask_022):
+    historial.carpeta().mkdir(parents=True)
+    os.chmod(historial.carpeta(), 0o755)
+    historial.guardar_preferencias(modelo="small")
+    assert _modo(historial.carpeta()) == 0o700
+
+
+def test_mismo_contenido_que_antes(tmp_path):
+    historial.guardar_preferencias(modelo="small", idioma="es")
+    texto = (historial.carpeta() / historial.ARCHIVO_PREFERENCIAS).read_text(encoding="utf-8")
+    assert texto == json.dumps({"modelo": "small", "idioma": "es"}, ensure_ascii=False, indent=2)
+
+
+def test_en_windows_guardar_no_lanza(tmp_path, monkeypatch):
+    from utils import archivos
+    monkeypatch.setattr(archivos, "_es_windows", lambda: True)
+    monkeypatch.delattr(archivos.os, "getuid", raising=False)
+    monkeypatch.setattr(archivos.os, "chmod", lambda *a, **k: None)
+    _guardar_todo(tmp_path)
+    assert historial.preferencias() == {"modelo": "small"}
+    assert historial.personas()
+    assert historial.listar()

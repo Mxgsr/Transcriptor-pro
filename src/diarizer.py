@@ -78,7 +78,7 @@ def cargar_pipeline(hf_token: str, modelo: str, dispositivo: str = "auto"):
         if not plataforma.hablantes_disponible():
             raise ImportError(plataforma.SIN_HABLANTES) from e
         raise ImportError(
-            "pyannote.audio no está instalado. Ejecuta: pip install -r requirements-diarizacion.txt"
+            "Falta un componente para identificar hablantes. Vuelve a ejecutar el instalador (está en el README)."
         ) from e
 
     logger.info(f"Cargando modelo de diarización: {modelo}")
@@ -464,14 +464,20 @@ def parsear_nombres(texto: str) -> dict:
     if not texto:
         return nombres
 
-    for posicion, item in enumerate(texto.split(","), start=1):
-        item = item.strip()
-        if not item:
-            continue
+    items = [item.strip() for item in texto.split(",")]
+    # Una coma final ("Ana,Luis,") es un descuido inofensivo; una vacía en medio movería los nombres de lugar
+    if len(items) > 1 and not items[-1]:
+        items.pop()
+    # Mezclar "2=Luis" con nombres sueltos es ambiguo (¿a quién le toca cada posición?): se pide una sola forma
+    con_numero = ["=" in item for item in items]
+    if any(con_numero) and not all(con_numero):
+        raise ValueError("En --nombres, usa una sola forma: todos en orden (Ana,Luis) o todos con número (1=Ana,3=Luis, si quieres saltarte a alguien).")
+
+    for posicion, item in enumerate(items, start=1):
         if "=" in item:
             numero, nombre = (parte.strip() for parte in item.split("=", 1))
-            if not numero.isdigit():
-                raise ValueError(f"En --nombres, '{numero}' debe ser el número del hablante (ej: 2=Luis).")
+            if not numero.isdigit() or int(numero) < 1:
+                raise ValueError(f"En --nombres, '{numero}' debe ser el número del hablante, desde 1 (ej: 2=Luis).")
             posicion = int(numero)
         else:
             nombre = item

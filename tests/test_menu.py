@@ -809,22 +809,8 @@ def test_en_mac_intel_no_ofrece_instalar_hablantes(guion, instalado, comandos, c
     assert "uv pip install" not in salida and "instalador" not in salida
 
 
-def test_abrir_en_windows(monkeypatch, tmp_path):
-    archivo = tmp_path / "charla.blocks.txt"
-    abiertos, comandos = [], []
-    monkeypatch.setattr(menu.sys, "platform", "win32")
-    monkeypatch.setattr(menu.os, "startfile", abiertos.append, raising=False)
-    monkeypatch.setattr(menu.subprocess, "run", lambda comando, **kw: comandos.append(comando))
-
-    menu.abrir(archivo)
-    menu.abrir(archivo, revelar=True)
-
-    assert abiertos == [str(archivo)]
-    assert comandos == [f'explorer /select,"{archivo}"']
-
-
 def test_limpiar_ruta_en_windows_respeta_las_barras(monkeypatch):
-    monkeypatch.setattr(menu.sys, "platform", "win32")
+    monkeypatch.setattr("sys.platform", "win32")
 
     assert str(menu.limpiar_ruta(r"C:\Users\max\audio.m4a")) == str(Path(r"C:\Users\max\audio.m4a"))
     assert str(menu.limpiar_ruta(r'"C:\Users\max\Mi audio.m4a"')) == str(Path(r"C:\Users\max\Mi audio.m4a"))
@@ -981,3 +967,13 @@ def test_acciones_ofrece_copiar_despues_de_abrir(guion, instalado, con_historial
     etiquetas_ = [o[0] for o in guion.opciones_de("¿Qué hago con")]
     assert etiquetas_[:3] == ["Abrir la transcripción", "Leer con el audio", "Copiar la transcripción"]
     copiar.assert_called_once()
+
+
+def test_copiar_transcripcion_con_un_txt_en_cp1252_no_cierra_el_menu(tmp_path, monkeypatch):
+    txt = tmp_path / "vieja.blocks.txt"
+    txt.write_bytes("[00:00:00] Ana: canción".encode("cp1252"))
+    copiado = []
+    monkeypatch.setattr(menu.aviso, "copiar_al_portapapeles", lambda t: copiado.append(t) or True)
+
+    assert menu.copiar_transcripcion(txt) is True
+    assert copiado[0].startswith("[00:00:00] Ana: canci")

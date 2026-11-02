@@ -6,6 +6,7 @@ from pathlib import Path
 
 # Importamos las herramientas internas de nuestra propia empresa
 from src.config import DOWNLOAD_DIR
+from src.ffmpeg_local import ruta_ffmpeg
 from utils.validators import es_url_valida
 
 # Instanciamos el auditor de este departamento
@@ -45,6 +46,10 @@ def descargar_audio(url: str, silencioso: bool = False, progreso=None, carpeta: 
         "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
         "progress_hooks": [_al_descargar],
         "quiet": silencioso,
+        # Un enlace watch?v=X&list=... baja solo el video, no la lista entera
+        "noplaylist": True,
+        # yt-dlp llama a ffmpeg por nombre: con la ruta completa no depende de qué haya en la carpeta actual
+        **({"ffmpeg_location": ruta_ffmpeg()} if os.path.isabs(ruta_ffmpeg()) else {}),
         "no_warnings": silencioso,
         "noprogress": silencioso,
     }

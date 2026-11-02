@@ -1,6 +1,0 @@
-# Dependencias opcionales para identificar hablantes (--diarizar)
--r requirements.txt
-
-# Motor de diarización (requiere token de Hugging Face, ver README)
-# (no disponible en Macs con Intel)
-pyannote.audio>=4.0; sys_platform != 'darwin' or platform_machine == 'arm64'

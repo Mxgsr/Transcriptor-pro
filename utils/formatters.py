@@ -6,9 +6,15 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from utils.archivos import escribir_json, escribir_texto
+
 # Nuestro auditor local
 logger = logging.getLogger(__name__)
 
+# Hay tres formatos de tiempo, cada uno para un uso distinto (no se pueden unir sin cambiar lo que se ve):
+# - format_timestamp_hhmmss: fijo y con ceros ("00:42:10"), para el .txt que lee el Grabador; redondea.
+# - formato_reloj: corto ("42:10" o "1:02:05"), para el avance y los fragmentos en pantalla; trunca.
+# - formato_duracion: en palabras ("1 min 48 s"), para resúmenes y avisos.
 def format_timestamp_hhmmss(seconds: float) -> str:
     """Convierte segundos a formato HH:MM:SS."""
     seconds = max(0, seconds)
@@ -17,6 +23,13 @@ def format_timestamp_hhmmss(seconds: float) -> str:
     m = (total_seconds % 3600) // 60
     s = total_seconds % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+def formato_reloj(segundos: float) -> str:
+    """Convierte segundos a '42:10' o '1:02:05'."""
+    segundos = int(segundos)
+    h, resto = divmod(segundos, 3600)
+    m, s = divmod(resto, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 def formato_duracion(segundos: float) -> str:
     """Convierte segundos a un texto corto: '3 s', '1 min 48 s', '1 h 02 min'."""
@@ -101,16 +114,16 @@ def guardar_txt_con_timestamps(segments_agrupados: list, output_path: Path, enca
 
     output_path = Path(output_path)
     try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(encabezado + "\n\n".join(lines))
+        escribir_texto(output_path, encabezado + "\n\n".join(lines), crear_carpeta=False)
         logger.info(f"Archivo TXT guardado en: {output_path}")
         
     except IOError as e:
         logger.error(f"Error crítico guardando el archivo TXT en {output_path}: {e}")
         raise
 
-def guardar_json(segments_agrupados: list, output_path: Path, audio: Path = None, nombres: dict = None,
-                 huellas: dict = None, titulo: str = None, fecha: date = None, duracion: float = None):
+def guardar_json(segments_agrupados: list, output_path: Path, audio: Optional[Path] = None,
+                 nombres: Optional[dict] = None, huellas: Optional[dict] = None, titulo: Optional[str] = None,
+                 fecha: Optional[date] = None, duracion: Optional[float] = None):
     """
     Guarda los párrafos en JSON para poder renombrar hablantes sin volver a procesar el audio.
     También guarda la ruta del audio (para escuchar a cada hablante después) y los nombres
@@ -133,8 +146,7 @@ def guardar_json(segments_agrupados: list, output_path: Path, audio: Path = None
         datos["fecha"] = fecha.isoformat() if fecha else None
         datos["duracion"] = duracion
     try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(datos, f, ensure_ascii=False, indent=2)
+        escribir_json(output_path, datos, crear_carpeta=False)
         logger.info(f"Archivo JSON guardado en: {output_path}")
 
     except IOError as e:
@@ -150,7 +162,9 @@ def cargar_transcripcion(input_path: Path) -> dict:
     input_path = Path(input_path)
     if not input_path.exists():
         raise FileNotFoundError(f"No se encontró el archivo: {input_path}")
-    with open(input_path, encoding="utf-8") as f:
+    # utf-8-sig: el Bloc de notas de Windows guarda con BOM y json.load fallaría. Aquí NO se aparta
+    # el archivo como .corrupto: si lo editó a mano e quedó inválido, se debe ver el error y arreglarlo.
+    with open(input_path, encoding="utf-8-sig") as f:
         datos = json.load(f)
     if isinstance(datos, list):
         return {"audio": None, "nombres": {}, "parrafos": datos, "huellas": {},
@@ -167,10 +181,6 @@ def cargar_transcripcion(input_path: Path) -> dict:
         "fecha": a_fecha(datos.get("fecha")),
         "duracion": datos.get("duracion") if isinstance(datos.get("duracion"), (int, float)) else None,
     }
-
-def cargar_json(input_path: Path) -> list:
-    """Lee los párrafos guardados por guardar_json."""
-    return cargar_transcripcion(input_path)["parrafos"]
 
 # Líneas del encabezado que escribe encabezado_de_transcripcion (en ese orden)
 _CLAVES_ENCABEZADO = {"Fecha": "fecha", "Duración": "duracion", "Participantes": "participantes"}

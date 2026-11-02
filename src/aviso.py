@@ -4,7 +4,8 @@
 # - notificar(): aviso del sistema, con sonido, al terminar.
 # - copiar_al_portapapeles(): copia un texto conservando tildes, ñ y emojis.
 # - confirmar_cancelar(): que un Ctrl+C accidental no tire a la basura una hora de trabajo.
-# Solo usa la librería estándar. Nada de aquí debe romper una transcripción: los fallos se ignoran.
+# Solo usa la librería estándar. Los programas que lanza no heredan el token de Hugging Face
+# (src/entorno.py). Nada de aquí debe romper una transcripción: los fallos se ignoran.
 import base64
 import contextlib
 import ctypes
@@ -13,12 +14,14 @@ import os
 import shutil
 import signal
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 
-log = logging.getLogger(__name__)
+from src import plataforma, rutas_windows
+from src.entorno import sin_secretos
+
+logger = logging.getLogger(__name__)
 
 # Constantes de Windows para SetThreadExecutionState (evita que el equipo se suspenda).
 ES_CONTINUOUS = 0x80000000
@@ -44,7 +47,9 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 # Leemos el archivo como UTF-8 explícito: así las tildes no se dañan según la configuración regional.
 _PS_PORTAPAPELES = "Get-Content -Raw -Encoding UTF8 -LiteralPath $env:AVISO_ARCHIVO | Set-Clipboard"
 
-_PS_BASE = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]
+# Sin el ejecutable: se pone al lanzar, con su ruta completa (rutas_windows.powershell()), para que
+# Windows no use un powershell.exe que alguien haya dejado en la carpeta actual.
+_PS_BASE = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]
 
 # Script de AppleScript fijo; título y mensaje llegan como argumentos (argv), sin escapar nada.
 _APPLESCRIPT = [
@@ -64,8 +69,9 @@ def _powershell(script: str, entorno: dict, timeout: float) -> bool:
     # -EncodedCommand (UTF-16LE en base64) evita problemas de comillas y de codificación en la consola.
     codificado = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     resultado = subprocess.run(
-        _PS_BASE + ["-EncodedCommand", codificado],
-        env={**os.environ, **entorno},
+        [rutas_windows.powershell(), *_PS_BASE, "-EncodedCommand", codificado],
+        # Las variables propias (AVISO_*) se suman al entorno, pero sin el token de Hugging Face
+        env=sin_secretos({**os.environ, **entorno}),
         capture_output=True,
         timeout=timeout,
         creationflags=_sin_ventana(),
@@ -79,27 +85,27 @@ def _powershell(script: str, entorno: dict, timeout: float) -> bool:
 @contextlib.contextmanager
 def sin_dormir():
     """Mantiene el computador despierto durante el bloque. Si algo falla, la transcripción sigue igual."""
-    plataforma = sys.platform
     proceso = None
     windows_activo = False
 
     try:
-        if plataforma == "darwin":
+        if plataforma.es_mac():
             # -i: no dormir por inactividad. -w: caffeinate se cierra solo si este programa muere de golpe.
             # start_new_session: Ctrl+C en la terminal llega a todo el grupo de procesos; sin esto,
             # el primer Ctrl+C (el que solo pide confirmación) mataría a caffeinate.
             proceso = subprocess.Popen(
                 ["caffeinate", "-i", "-w", str(os.getpid())],
+                env=sin_secretos(),  # caffeinate no necesita el token de Hugging Face
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        elif plataforma == "win32":
+        elif plataforma.es_windows():
             # El estado es por hilo: sirve porque la transcripción corre en el hilo que llama aquí.
             ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
             windows_activo = True
     except Exception as error:
-        log.debug("No se pudo evitar que el equipo se duerma: %s", error)
+        logger.debug("No se pudo evitar que el equipo se duerma: %s", error)
 
     try:
         yield
@@ -112,7 +118,7 @@ def sin_dormir():
             if windows_activo:
                 ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
         except Exception as error:
-            log.debug("No se pudo soltar el bloqueo de suspensión: %s", error)
+            logger.debug("No se pudo soltar el bloqueo de suspensión: %s", error)
 
 
 # ---------------------------------------------------------------------------
@@ -121,13 +127,14 @@ def sin_dormir():
 def notificar(titulo: str, mensaje: str) -> None:
     """Muestra un aviso del sistema con sonido. Nunca lanza errores ni espera mucho."""
     try:
-        if sys.platform == "darwin":
+        if plataforma.es_mac():
             subprocess.run(
                 ["osascript", *_APPLESCRIPT, titulo, mensaje],
+                env=sin_secretos(),
                 capture_output=True,
                 timeout=5,
             )
-        elif sys.platform == "win32":
+        elif plataforma.es_windows():
             # Se eligió PowerShell + API de avisos de Windows 10/11 porque no necesita instalar nada.
             # El pitido va aparte y primero: si el aviso no sale (Asistente de concentración, etc.),
             # al menos se oye algo.
@@ -136,13 +143,15 @@ def notificar(titulo: str, mensaje: str) -> None:
 
                 winsound.MessageBeep()
             except Exception as error:
-                log.debug("No se pudo reproducir el sonido: %s", error)
+                logger.debug("No se pudo reproducir el sonido: %s", error)
             _powershell(_PS_TOAST, {"AVISO_TITULO": titulo, "AVISO_MENSAJE": mensaje}, timeout=10)
         else:
             if shutil.which("notify-send"):
-                subprocess.run(["notify-send", titulo, mensaje], capture_output=True, timeout=5)
+                subprocess.run(
+                    ["notify-send", titulo, mensaje], env=sin_secretos(), capture_output=True, timeout=5
+                )
     except Exception as error:
-        log.debug("No se pudo mostrar la notificación: %s", error)
+        logger.debug("No se pudo mostrar la notificación: %s", error)
 
 
 # ---------------------------------------------------------------------------
@@ -153,15 +162,15 @@ def copiar_al_portapapeles(texto: str) -> bool:
     if not texto:
         return False  # nada que copiar (y Set-Clipboard de Windows falla con un texto vacío)
     try:
-        if sys.platform == "darwin":
+        if plataforma.es_mac():
             # Sin LANG UTF-8, pbcopy daña las tildes cuando se lanza desde algunos entornos.
-            entorno = {**os.environ, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
+            entorno = sin_secretos({**os.environ, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"})
             resultado = subprocess.run(
                 ["pbcopy"], input=texto.encode("utf-8"), env=entorno, timeout=10, capture_output=True
             )
             return resultado.returncode == 0
 
-        if sys.platform == "win32":
+        if plataforma.es_windows():
             # Se eligió PowerShell + archivo temporal UTF-8 en vez de la API Win32 por ctypes:
             # es más corto y evita errores de memoria con punteros de 64 bits.
             descriptor, ruta = tempfile.mkstemp(suffix=".txt", prefix="aviso_")
@@ -179,10 +188,12 @@ def copiar_al_portapapeles(texto: str) -> bool:
             comando = ["xclip", "-selection", "clipboard"]
         else:
             return False
-        resultado = subprocess.run(comando, input=texto.encode("utf-8"), timeout=10, capture_output=True)
+        resultado = subprocess.run(
+            comando, input=texto.encode("utf-8"), env=sin_secretos(), timeout=10, capture_output=True
+        )
         return resultado.returncode == 0
     except Exception as error:
-        log.debug("No se pudo copiar al portapapeles: %s", error)
+        logger.debug("No se pudo copiar al portapapeles: %s", error)
         return False
 
 
@@ -219,12 +230,12 @@ def confirmar_cancelar(despues_de: float = 60, avisar=None, ventana: float = 5, 
             try:
                 avisar(MENSAJE_CONFIRMAR)
             except Exception as error:
-                log.debug("No se pudo mostrar el aviso de cancelación: %s", error)
+                logger.debug("No se pudo mostrar el aviso de cancelación: %s", error)
 
     try:
         anterior = signal.signal(signal.SIGINT, manejador)
     except (ValueError, OSError) as error:
-        log.debug("No se pudo instalar el manejador de Ctrl+C: %s", error)
+        logger.debug("No se pudo instalar el manejador de Ctrl+C: %s", error)
         yield
         return
 

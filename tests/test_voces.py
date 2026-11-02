@@ -2,6 +2,9 @@
 # Pruebas del reconocimiento de personas por la voz (huellas guardadas en voces.json).
 # conftest.py apunta TRANSCRIPTOR_HOME a una carpeta temporal: cada test empieza sin voces.
 import json
+import os
+import stat
+import sys
 import math
 
 import pytest
@@ -243,3 +246,43 @@ def test_corregir_nombres_cruzados_deja_cada_voz_limpia():
     assert voces.similitud(guardadas["Ana"]["huella"], [1.0, 0.0, 0.0]) > 0.95
     propuestas = voces.parecidos({"Hablante 1": [1.0, 0.0, 0.0], "Hablante 2": [0.0, 1.0, 0.0]})
     assert propuestas["Hablante 1"][0] == "Ana" and propuestas["Hablante 2"] == ("Luis", 1.0)
+
+
+def test_voces_json_danado_se_aparta_y_no_se_pierde():
+    _archivo().parent.mkdir(parents=True, exist_ok=True)
+    _archivo().write_text('{"Ana": {"huella": [1, 0', encoding="utf-8")
+
+    assert voces.conocidas() == []
+    voces.recordar("Luis", LUIS)
+
+    assert voces.conocidas() == ["Luis"]
+    assert (historial.carpeta() / "voces.json.corrupto").read_text(encoding="utf-8") == '{"Ana": {"huella": [1, 0'
+
+
+def test_voces_json_que_no_es_un_objeto_no_rompe():
+    _archivo().parent.mkdir(parents=True, exist_ok=True)
+    _archivo().write_text("[1, 2]", encoding="utf-8")
+    assert voces.conocidas() == []
+    assert voces.olvidar("Ana") is False
+
+
+# --- Permisos: las huellas son datos biométricos y solo las puede leer quien usa el programa ---
+
+@pytest.mark.skipif(sys.platform == "win32", reason="en Windows no hay permisos POSIX")
+def test_voces_json_queda_0600_aunque_el_umask_sea_022():
+    anterior = os.umask(0o022)
+    try:
+        voces.recordar("Ana", ANA)
+    finally:
+        os.umask(anterior)
+    assert stat.S_IMODE(os.stat(_archivo()).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(historial.carpeta()).st_mode) == 0o700
+
+
+def test_voces_en_windows_no_lanza(monkeypatch):
+    from utils import archivos
+    monkeypatch.setattr(archivos, "_es_windows", lambda: True)
+    monkeypatch.delattr(archivos.os, "getuid", raising=False)
+    monkeypatch.setattr(archivos.os, "chmod", lambda *a, **k: None)
+    assert voces.recordar("Ana", ANA)
+    assert voces.conocidas() == ["Ana"]

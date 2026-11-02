@@ -128,3 +128,11 @@ def test_descargar_en_la_carpeta_indicada(carpeta_descargas, monkeypatch, tmp_pa
     assert resultado == otra / "Video.mp3"
     assert youtube_dl.call_args.args[0]["outtmpl"] == str(otra / "%(title)s.%(ext)s")
     assert not carpeta_descargas.exists()
+
+
+def test_descargar_no_baja_la_lista_entera(carpeta_descargas, monkeypatch):
+    youtube_dl = simular_yt_dlp(monkeypatch, carpeta_descargas)
+
+    downloader.descargar_audio("https://www.youtube.com/watch?v=abc&list=PL123")
+
+    assert youtube_dl.call_args.args[0]["noplaylist"] is True

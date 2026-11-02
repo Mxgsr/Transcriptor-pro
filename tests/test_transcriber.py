@@ -351,9 +351,9 @@ def test_agrupar_sin_dudas_no_agrega_la_clave():
 
 def test_dudosas_sobreviven_a_limpiar_parrafos_y_a_guardar_json(tmp_path):
     from src.repeticiones import limpiar_parrafos
-    from utils.formatters import cargar_json, guardar_json
+    from utils.formatters import cargar_transcripcion, guardar_json
     segs = [{**seg(0, 2, "Hola."), "speaker": "Hablante 1",
              "dudosa": {"otro": "Hablante 2", "motivo": "repartida"}}]
     parrafos = limpiar_parrafos(agrupar_segmentos_en_parrafos(segs))
     guardar_json(parrafos, tmp_path / "a.blocks.json")
-    assert cargar_json(tmp_path / "a.blocks.json")[0]["dudosas"][0]["motivo"] == "repartida"
+    assert cargar_transcripcion(tmp_path / "a.blocks.json")["parrafos"][0]["dudosas"][0]["motivo"] == "repartida"

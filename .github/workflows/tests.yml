@@ -21,3 +21,24 @@ jobs:
         run: pip install -r requirements-dev.txt
       - name: Ejecutar pytest
         run: python -m pytest -v
+
+  # Windows: aquí corren por primera vez las pruebas en un Windows de verdad (rutas con \, UTF-8 vs cp1252,
+  # archivos abiertos). Mientras no se sepa cuántas fallan por diferencias de las pruebas y no del programa,
+  # no bloquea el resto: si falla, se ve en la pestaña Actions pero el check general no se pone en rojo.
+  pytest-windows:
+    runs-on: windows-latest
+    continue-on-error: true
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Instalar dependencias de test
+        run: pip install -r requirements-dev.txt
+      - name: Ejecutar pytest
+        run: python -m pytest -v

@@ -84,16 +84,13 @@ def _clave_texto(texto: str) -> str:
     return " ".join(_clave(p) for p in texto.split())
 
 
-def limpiar_parrafos(parrafos: list, guardar_original: bool = False) -> list:
+def limpiar_parrafos(parrafos: list) -> list:
     """
     Quita los bucles del texto de cada párrafo. Retorna copias.
-    Con guardar_original=True, cada párrafo que cambió guarda su texto anterior en "texto_original".
     """
     limpios = []
     for parrafo in parrafos:
         texto = quitar_repeticiones(parrafo["text"].strip())
         nuevo = {**parrafo, "text": texto}
-        if guardar_original and texto != parrafo["text"].strip():
-            nuevo.setdefault("texto_original", parrafo["text"])
         limpios.append(nuevo)
     return limpios

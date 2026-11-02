@@ -161,7 +161,7 @@ def test_parsear_nombres_por_orden_y_por_numero():
     assert parsear_nombres(None) == {}
 
 
-@pytest.mark.parametrize("texto", ["x=Ana", "2="])
+@pytest.mark.parametrize("texto", ["x=Ana", "2=", "2=Luis,Ana", "Ana,2=Luis", "Ana,,Luis", "0=Ana", "1=Ana,=Luis"])
 def test_parsear_nombres_invalidos(texto):
     with pytest.raises(ValueError):
         parsear_nombres(texto)

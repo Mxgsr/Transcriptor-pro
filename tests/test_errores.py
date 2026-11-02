@@ -347,3 +347,43 @@ def test_no_notifica_si_falla(aviso_falso, monkeypatch):
     with pytest.raises(typer.Exit):
         cli.ejecutar_transcripcion("a.mp3", "turbo")
     assert not any(isinstance(x, tuple) and x[0] == "notificar" for x in eventos)
+
+
+# --- Permisos: el detalle trae rutas y comandos; solo lo lee quien usa el programa ---
+
+@pytest.mark.skipif(sys.platform == "win32", reason="en Windows no hay permisos POSIX")
+def test_detalle_de_error_queda_privado():
+    import os
+    import stat
+    anterior = os.umask(0o022)
+    try:
+        ruta = errores.guardar_detalle(RuntimeError("x"))
+    finally:
+        os.umask(anterior)
+    assert stat.S_IMODE(os.stat(ruta).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(ruta.parent).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(historial.carpeta()).st_mode) == 0o700
+
+
+def test_detalle_mismo_contenido_que_armar_detalle(monkeypatch):
+    from datetime import datetime
+    momento = datetime(2026, 10, 30, 10, 15, 0)
+
+    class Reloj(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return momento
+
+    monkeypatch.setattr(errores, "datetime", Reloj)
+    e = RuntimeError("x")
+    ruta = errores.guardar_detalle(e)
+    assert ruta.read_bytes() == errores.armar_detalle(e, momento).encode("utf-8")
+
+
+def test_detalle_en_windows_no_lanza(monkeypatch):
+    from utils import archivos
+    monkeypatch.setattr(archivos, "_es_windows", lambda: True)
+    monkeypatch.delattr(archivos.os, "getuid", raising=False)
+    monkeypatch.setattr(archivos.os, "chmod", lambda *a, **k: None)
+    ruta = errores.guardar_detalle(RuntimeError("x"))
+    assert ruta is not None and ruta.exists()

@@ -56,13 +56,33 @@ if [ "$es_mac_intel" = false ] && ! grep -qs '^HF_TOKEN=' "$CONFIG" && (: </dev/
     paso "Identificar quién habla (opcional)"
     echo "Necesita un token gratuito de Hugging Face: https://huggingface.co/settings/tokens"
     echo "y aceptar las condiciones del modelo en: https://huggingface.co/pyannote/speaker-diarization-community-1"
+    echo "Al pegarlo no se verá nada: es normal, el token queda oculto. Luego aprieta Enter."
     printf "Pega tu token (o Enter para saltarlo): "
     TOKEN=""
+    # Que el token no quede a la vista en la pantalla (ni en una grabación o captura): se apaga el
+    # eco de la terminal mientras se pega. Los trap lo vuelven a encender pase lo que pase (Ctrl+C,
+    # la ventana que se cierra...): si no, la terminal quedaría sin mostrar lo que se escribe.
+    eco_apagado=false
+    if stty -echo </dev/tty 2>/dev/null; then
+        eco_apagado=true
+        # (el EXIT también borra la carpeta temporal: un trap nuevo reemplaza al anterior)
+        trap 'stty echo </dev/tty 2>/dev/null; rm -rf "$TEMPORAL"' EXIT
+        trap 'stty echo </dev/tty 2>/dev/null; echo; exit 130' INT TERM HUP
+    fi
     read -r TOKEN </dev/tty || TOKEN=""
+    if [ "$eco_apagado" = true ]; then
+        stty echo </dev/tty 2>/dev/null || true
+        trap 'rm -rf "$TEMPORAL"' EXIT
+        trap - INT TERM HUP
+    fi
+    echo  # sin eco, el Enter no baja de línea
     if [ -n "$TOKEN" ]; then
         mkdir -p "$(dirname "$CONFIG")"
-        printf 'HF_TOKEN=%s\n' "$TOKEN" >>"$CONFIG"
+        # El archivo se crea ya privado (solo tu usuario) ANTES de escribir el token: así nunca
+        # existe, ni por un instante, un archivo con el token que otros usuarios puedan leer.
+        (umask 077 && touch "$CONFIG")
         chmod 600 "$CONFIG"
+        printf 'HF_TOKEN=%s\n' "$TOKEN" >>"$CONFIG"
         echo "Guardado en $CONFIG"
     fi
 fi

@@ -1,5 +1,6 @@
 # Ubicación: tests/test_procesador.py
 import json
+import pytest
 from unittest.mock import MagicMock
 
 from src import procesador
@@ -368,3 +369,35 @@ def test_escuchar_hablantes_encuentra_el_audio_aunque_el_nombre_ya_no_coincida(t
     resultado = procesador.procesar_entrada(str(audio), "tiny", diarizar=True, titulo="Reunión", fecha="2026-10-30")
 
     assert procesador.leer_transcripcion(resultado.json_path)["audio"] == audio.resolve()
+
+
+def test_si_falla_preparar_hablantes_y_se_pide_continuar_transcribe_igual(tmp_path, monkeypatch):
+    audio = tmp_path / "charla.mp3"
+    audio.write_bytes(b"")
+    monkeypatch.setattr(procesador, "transcribir_audio", MagicMock(return_value=[dict(s) for s in SEGMENTOS]))
+    monkeypatch.setattr(procesador, "cargar_pipeline", MagicMock(side_effect=RuntimeError("falta HF_TOKEN")))
+    diarizar = MagicMock()
+    monkeypatch.setattr(procesador, "diarizar_audio", diarizar)
+    fallos = []
+
+    resultado = procesador.procesar_entrada(str(audio), "tiny", diarizar=True, continuar_sin_hablantes=True,
+                                            al_fallar=fallos.append)
+
+    assert resultado.txt_path.exists()
+    assert resultado.json_path is None
+    assert resultado.error_hablantes == "falta HF_TOKEN"
+    assert fallos == ["falta HF_TOKEN"]
+    diarizar.assert_not_called()
+
+
+def test_si_falla_preparar_hablantes_por_defecto_falla_rapido(tmp_path, monkeypatch):
+    audio = tmp_path / "charla.mp3"
+    audio.write_bytes(b"")
+    transcribir = MagicMock(return_value=[dict(s) for s in SEGMENTOS])
+    monkeypatch.setattr(procesador, "transcribir_audio", transcribir)
+    monkeypatch.setattr(procesador, "cargar_pipeline", MagicMock(side_effect=RuntimeError("falta HF_TOKEN")))
+
+    with pytest.raises(RuntimeError):
+        procesador.procesar_entrada(str(audio), "tiny", diarizar=True)
+
+    transcribir.assert_not_called()

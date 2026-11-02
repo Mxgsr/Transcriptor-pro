@@ -7,6 +7,10 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from src import plataforma
+from src.entorno import sin_secretos
+from src.ffmpeg_local import ruta_ffmpeg
+
 logger = logging.getLogger(__name__)
 
 EXTENSIONES_AUDIO = (".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".mp4", ".mov", ".mkv", ".webm")
@@ -45,12 +49,14 @@ def elegir_fragmentos(parrafos: list, hablante: str, maximo: int = 3) -> list:
 
 def extraer_fragmento(audio: Path, inicio: float, duracion: float, destino: Path) -> Path:
     """Recorta el audio con ffmpeg (desde inicio, durante duracion segundos) y lo guarda en destino."""
+    # Ruta completa y no "ffmpeg": en Windows se usaría un ffmpeg.exe que esté junto al audio
     cmd = [
-        "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+        ruta_ffmpeg(), "-nostdin", "-loglevel", "error", "-y",
         "-ss", f"{max(0.0, inicio):.2f}", "-t", f"{max(0.5, duracion):.2f}",
         "-i", str(audio), "-vn", str(destino),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    # ffmpeg no necesita el token de Hugging Face: no se lo heredamos
+    subprocess.run(cmd, check=True, capture_output=True, env=sin_secretos())
     return destino
 
 
@@ -60,10 +66,15 @@ REPRODUCIR_EN_WINDOWS = "import sys, winsound; winsound.PlaySound(sys.argv[1], w
 
 def comando_reproductor() -> Optional[list]:
     """afplay viene con macOS; en Windows, winsound; ffplay (de ffmpeg) sirve en otros sistemas."""
+    if plataforma.es_windows():
+        # Windows va primero: buscar "afplay" allí podría encontrar un afplay.exe en la carpeta actual.
+        # sys.executable ya es una ruta completa. -I (modo aislado) quita la carpeta actual de las
+        # importaciones: sin él, un winsound.py dejado junto al audio se cargaría en vez del de Python.
+        return [sys.executable, "-I", "-c", REPRODUCIR_EN_WINDOWS]
     if shutil.which("afplay"):
         return ["afplay"]
-    if sys.platform == "win32":
-        return [sys.executable, "-c", REPRODUCIR_EN_WINDOWS]
+    # ffplay solo se busca fuera de Windows (allí ya se volvió con winsound), donde no se mira la
+    # carpeta actual: queda por nombre, como siempre.
     if shutil.which("ffplay"):
         return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
     return None
@@ -80,6 +91,7 @@ class Reproductor:
         self.detener()
         self.proceso = subprocess.Popen(
             [*self.comando, str(archivo)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=sin_secretos(),  # el reproductor tampoco hereda el token
         )
 
     def detener(self):

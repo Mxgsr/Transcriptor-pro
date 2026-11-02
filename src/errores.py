@@ -108,10 +108,13 @@ def carpeta_errores() -> Path:
 
 def _version() -> str:
     try:
-        from importlib.metadata import version
-        return version("transcriptor-pro")
+        # Importación diferida: actualizar importa ajustes e historial, y no hace falta al cargar este módulo
+        from src import actualizar
+        version = actualizar.version_instalada()
     except Exception:
         return "desconocida"
+    # version_instalada() responde "0" cuando no pudo saber la versión
+    return "desconocida" if version == "0" else version
 
 
 def _sin_secretos(texto: str) -> str:
@@ -145,14 +148,16 @@ def guardar_detalle(e: BaseException) -> Optional[Path]:
     """Guarda el detalle en <historial>/errores/AAAA-MM-DD_HHMMSS.txt. Si no se puede, None (nunca lanza)."""
     try:
         ahora = datetime.now()
-        carpeta = carpeta_errores()
-        carpeta.mkdir(parents=True, exist_ok=True)
+        # Privada: el detalle trae rutas, nombres de archivo y el comando usado
+        from src import historial
+        carpeta = historial.carpeta_privada("errores")
         base = f"{ahora:%Y-%m-%d_%H%M%S}"
         ruta, n = carpeta / f"{base}.txt", 2
         while ruta.exists():  # dos errores en el mismo segundo
             ruta = carpeta / f"{base}_{n}.txt"
             n += 1
-        ruta.write_text(armar_detalle(e, ahora), encoding="utf-8")
+        from utils.archivos import escribir_texto
+        escribir_texto(ruta, armar_detalle(e, ahora), privado=True)
         _limpiar_viejos(carpeta)
         return ruta
     except Exception:

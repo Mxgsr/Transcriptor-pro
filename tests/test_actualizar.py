@@ -1,10 +1,14 @@
 # Ubicación: tests/test_actualizar.py
 # Pruebas de src/actualizar.py sin red ni instalaciones reales: urlopen, subprocess, sys.platform,
-# sys.prefix y shutil.which están simulados.
+# sys.prefix y shutil.which están simulados. Los zips «de GitHub» se arman en memoria.
 import io
+import json
+import os
+import shutil
 import subprocess
 import sys
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -293,62 +297,116 @@ def test_buscar_uv(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # actualizar
 # ---------------------------------------------------------------------------
+_SHA = "0123456789abcdef0123456789abcdef01234567"
+_URL_API_V2 = "https://api.github.com/repos/Mxgsr/Transcriptor-pro/commits/v2"
+_URL_ZIP = f"https://github.com/Mxgsr/Transcriptor-pro/archive/{_SHA}.zip"
+
+
+def _zip(version="2.0.0b2", raiz=f"Transcriptor-pro-{_SHA}", con_pyproject=True, extras=()):
+    """Un zip como el que da GitHub: todo dentro de una carpeta raíz."""
+    memoria = io.BytesIO()
+    with zipfile.ZipFile(memoria, "w") as zip_:
+        zip_.writestr(f"{raiz}/", "")
+        zip_.writestr(f"{raiz}/src/__init__.py", "")
+        if con_pyproject:
+            zip_.writestr(f"{raiz}/pyproject.toml", _pyproject(version))
+        for nombre in extras:
+            zip_.writestr(nombre, "x")
+    return memoria.getvalue()
+
+
+class _RespuestaConCabeceras(_Respuesta):
+    def __init__(self, datos, cabeceras):
+        super().__init__(datos)
+        self.headers = cabeceras
+
+
+def _simular_descarga(monkeypatch, api=None, zip_bytes=None, pedidas=None):
+    """api: JSON (dict), bytes crudos o Exception; zip_bytes: bytes, respuesta o Exception."""
+    if api is None:
+        api = {"sha": _SHA, "commit": {"message": "x"}}
+    if zip_bytes is None:
+        zip_bytes = _zip()
+
+    def urlopen(peticion, timeout=None):
+        url = peticion.full_url
+        if pedidas is not None:
+            pedidas.append((url, timeout, dict(peticion.header_items())))
+        valor = api if url.startswith("https://api.github.com/") else zip_bytes
+        if isinstance(valor, Exception):
+            raise valor
+        if isinstance(valor, dict):  # la API responde solo el SHA en texto (Accept: vnd.github.sha)
+            return _Respuesta(str(valor.get("sha", "")).encode("utf-8"))
+        if isinstance(valor, bytes):
+            return _Respuesta(valor)
+        return valor
+
+    monkeypatch.setattr(actualizar.urllib.request, "urlopen", urlopen)
+
+
 @pytest.fixture
 def como_uv_tool(monkeypatch):
     monkeypatch.setattr(actualizar, "como_se_instalo", lambda: "uv_tool")
     monkeypatch.setattr(actualizar, "buscar_uv", lambda: "/ruta/uv")
+    _instalada(monkeypatch, "2.0.0b1")
 
 
-def test_actualizar_unix(monkeypatch, como_uv_tool):
+@pytest.fixture
+def run_falso(monkeypatch):
+    """Simula uv en Mac/Linux: guarda el comando, el entorno y lo que había en el zip al instalar."""
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.delenv("UV_HTTP_TIMEOUT", raising=False)
-    pedidas, ejecutadas, carpetas = [], [], []
-
-    def urlopen(peticion, timeout=None):
-        pedidas.append((peticion.full_url, timeout))
-        return _Respuesta(b"ZIPFALSO")
+    ejecutadas = []
 
     def run(comando, **kwargs):
         zip_ = Path(comando[-1].split(" @ file://")[1])
-        carpetas.append(zip_.parent)
-        assert zip_.read_bytes() == b"ZIPFALSO"  # el zip ya estaba bajado
-        ejecutadas.append((comando, kwargs))
+        ejecutadas.append({"comando": comando, "kwargs": kwargs, "zip": zip_, "bytes": zip_.read_bytes()})
         return subprocess.CompletedProcess(comando, 0)
 
-    monkeypatch.setattr(actualizar.urllib.request, "urlopen", urlopen)
     monkeypatch.setattr(actualizar.subprocess, "run", run)
+    return ejecutadas
+
+
+def test_actualizar_unix(monkeypatch, como_uv_tool, run_falso):
+    monkeypatch.delenv("UV_HTTP_TIMEOUT", raising=False)
+    monkeypatch.setenv("HF_TOKEN", "hf_secreto")
+    pedidas = []
+    _simular_descarga(monkeypatch, pedidas=pedidas)
     mensajes = []
 
     assert actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=mensajes.append) == "listo"
-    assert pedidas[0][0] == "https://github.com/Mxgsr/Transcriptor-pro/archive/refs/heads/v2.zip"
-    assert pedidas[0][1] >= 60
-    comando, kwargs = ejecutadas[0]
-    zip_ruta = Path(comando[-1].split(" @ file://")[1])
+    # Primero se fija el commit y luego se baja ESE commit, no la rama
+    assert [p[0] for p in pedidas] == [_URL_API_V2, _URL_ZIP]
+    cabeceras_api = {k.lower(): v for k, v in pedidas[0][2].items()}
+    assert cabeceras_api["accept"] == "application/vnd.github.sha"
+    assert cabeceras_api["user-agent"]
+    assert pedidas[0][1] and pedidas[1][1] >= 60
+    assert not any("refs/heads" in p[0] for p in pedidas)
+
+    llamada = run_falso[0]
+    comando, kwargs = llamada["comando"], llamada["kwargs"]
     assert comando[:-1] == ["/ruta/uv", "tool", "install", "--force", "--upgrade",
                             "--reinstall-package", "transcriptor-pro", "--python", "3.11"]
-    assert comando[-1] == f"transcriptor-pro[diarizacion] @ {zip_ruta.as_uri()}"
+    assert comando[-1] == f"transcriptor-pro[diarizacion] @ {llamada['zip'].as_uri()}"
+    assert llamada["bytes"] == _zip()  # el zip ya estaba bajado y es el revisado
     assert kwargs["env"]["UV_HTTP_TIMEOUT"] == "300"
+    assert "HF_TOKEN" not in kwargs["env"]
     assert not kwargs.get("capture_output") and not kwargs.get("shell")
-    assert not carpetas[0].exists()  # borró la carpeta temporal
+    assert not llamada["zip"].parent.exists()  # borró la carpeta temporal
     assert mensajes
 
 
-def test_actualizar_unix_respeta_uv_http_timeout(monkeypatch, como_uv_tool):
-    monkeypatch.setattr(sys, "platform", "linux")
+def test_actualizar_unix_respeta_uv_http_timeout(monkeypatch, como_uv_tool, run_falso):
     monkeypatch.setenv("UV_HTTP_TIMEOUT", "99")
-    entornos = []
-    monkeypatch.setattr(actualizar.urllib.request, "urlopen", lambda p, timeout=None: _Respuesta(b"x"))
-    monkeypatch.setattr(actualizar.subprocess, "run",
-                        lambda c, **k: entornos.append(k["env"]) or subprocess.CompletedProcess(c, 0))
-    actualizar.actualizar(Novedad("1.0.0", "main"), salida=lambda *_: None)
-    assert entornos[0]["UV_HTTP_TIMEOUT"] == "99"
+    _simular_descarga(monkeypatch)
+    actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=lambda *_: None)
+    assert run_falso[0]["kwargs"]["env"]["UV_HTTP_TIMEOUT"] == "99"
 
 
 def test_actualizar_unix_uv_falla(monkeypatch, como_uv_tool):
     monkeypatch.setattr(sys, "platform", "linux")
-    monkeypatch.setattr(actualizar.urllib.request, "urlopen", lambda p, timeout=None: _Respuesta(b"x"))
+    _simular_descarga(monkeypatch)
     monkeypatch.setattr(actualizar.subprocess, "run", lambda c, **k: subprocess.CompletedProcess(c, 1))
-    assert actualizar.actualizar(Novedad("1.0.0", "main"), salida=lambda *_: None) == "error"
+    assert actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=lambda *_: None) == "error"
 
 
 def test_actualizar_unix_sin_red_no_lanza(monkeypatch, como_uv_tool):
@@ -358,16 +416,135 @@ def test_actualizar_unix_sin_red_no_lanza(monkeypatch, como_uv_tool):
         raise OSError("sin internet")
 
     monkeypatch.setattr(actualizar.urllib.request, "urlopen", sin_red)
-    assert actualizar.actualizar(Novedad("1.0.0", "main"), salida=lambda *_: None) == "error"
+    monkeypatch.setattr(actualizar.subprocess, "run", lambda *a, **k: pytest.fail("no debía instalar"))
+    assert actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=lambda *_: None) == "error"
+
+
+def test_actualizar_zip_falla_tras_resolver_el_commit(monkeypatch, como_uv_tool):
+    monkeypatch.setattr(sys, "platform", "linux")
+    _simular_descarga(monkeypatch, zip_bytes=OSError("se cortó"))
+    monkeypatch.setattr(actualizar.subprocess, "run", lambda *a, **k: pytest.fail("no debía instalar"))
+    assert actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=lambda *_: None) == "error"
+
+
+def _sin_instalar(monkeypatch, caplog, novedad=Novedad("2.0.0b2", "v2"), plataforma="linux", **simulacion):
+    """Corre actualizar() esperando que rechace: devuelve «error», no instala ni lanza nada y lo registra."""
+    monkeypatch.setattr(sys, "platform", plataforma)
+    pedidas = []
+    _simular_descarga(monkeypatch, pedidas=pedidas, **simulacion)
+
+    def prohibido(*args, **kwargs):
+        pytest.fail("no debía instalar ni lanzar nada")
+
+    monkeypatch.setattr(actualizar.subprocess, "run", prohibido)
+    monkeypatch.setattr(actualizar.subprocess, "Popen", prohibido)
+    carpetas = []
+    mkdtemp_real = actualizar.tempfile.mkdtemp
+    monkeypatch.setattr(actualizar.tempfile, "mkdtemp",
+                        lambda **k: carpetas.append(mkdtemp_real(**k)) or carpetas[-1])
+    with caplog.at_level("WARNING", logger="src.actualizar"):
+        assert actualizar.actualizar(novedad, salida=lambda *_: None) == "error"
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+    assert all(not Path(c).exists() for c in carpetas)  # no deja la descarga tirada
+    return pedidas
+
+
+def test_actualizar_api_falla_no_cae_a_la_rama(monkeypatch, como_uv_tool, caplog):
+    pedidas = _sin_instalar(monkeypatch, caplog, api=OSError("API caída"))
+    assert [p[0] for p in pedidas] == [_URL_API_V2]  # ni siquiera intenta bajar la rama
+
+
+def test_actualizar_api_responde_basura(monkeypatch, como_uv_tool, caplog):
+    _sin_instalar(monkeypatch, caplog, api=b"<html>no es json</html>")
+
+
+@pytest.mark.parametrize("sha", [None, "", "abc123", "g" * 40, _SHA + "0", "../" + _SHA[:37], 12345])
+def test_actualizar_sha_con_formato_raro(monkeypatch, como_uv_tool, caplog, sha):
+    pedidas = _sin_instalar(monkeypatch, caplog, api={"sha": sha})
+    assert len(pedidas) == 1
+
+
+def test_actualizar_rama_desconocida(monkeypatch, como_uv_tool, caplog):
+    pedidas = _sin_instalar(monkeypatch, caplog, novedad=Novedad("2.0.0b2", "../../otra"))
+    assert pedidas == []
+
+
+def test_actualizar_sha_en_mayusculas_se_normaliza(monkeypatch, como_uv_tool, run_falso):
+    pedidas = []
+    _simular_descarga(monkeypatch, api={"sha": _SHA.upper()}, pedidas=pedidas)
+    assert actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=lambda *_: None) == "listo"
+    assert pedidas[1][0] == _URL_ZIP
+
+
+def test_actualizar_version_del_zip_distinta_de_la_anunciada(monkeypatch, como_uv_tool, caplog):
+    _sin_instalar(monkeypatch, caplog, zip_bytes=_zip(version="2.0.0b3"))
+    assert "2.0.0b3" in caplog.text
+
+
+@pytest.mark.parametrize("version", ["2.0.0b1", "2.0.0a9", "1.9.0"])
+def test_actualizar_version_del_zip_no_es_mas_nueva(monkeypatch, como_uv_tool, caplog, version):
+    # Aunque coincida con lo anunciado, nunca se instala la misma versión ni una anterior
+    _sin_instalar(monkeypatch, caplog, novedad=Novedad(version, "main"), zip_bytes=_zip(version=version))
+
+
+@pytest.mark.parametrize("ruta", [
+    f"Transcriptor-pro-{_SHA}/../../fuera.txt",
+    "/etc/fuera.txt",
+    "C:/Windows/fuera.txt",
+    f"Transcriptor-pro-{_SHA}\\..\\fuera.txt",
+])
+def test_actualizar_zip_con_rutas_peligrosas(monkeypatch, como_uv_tool, caplog, ruta):
+    _sin_instalar(monkeypatch, caplog, zip_bytes=_zip(extras=[ruta]))
+
+
+def test_actualizar_zip_sin_pyproject(monkeypatch, como_uv_tool, caplog):
+    _sin_instalar(monkeypatch, caplog, zip_bytes=_zip(con_pyproject=False))
+
+
+def test_actualizar_zip_con_pyproject_solo_en_subcarpeta(monkeypatch, como_uv_tool, caplog):
+    memoria = io.BytesIO()
+    with zipfile.ZipFile(memoria, "w") as zip_:
+        zip_.writestr(f"Transcriptor-pro-{_SHA}/otra/pyproject.toml", _pyproject("2.0.0b2"))
+    _sin_instalar(monkeypatch, caplog, zip_bytes=memoria.getvalue())
+
+
+def test_actualizar_zip_con_varias_raices(monkeypatch, como_uv_tool, caplog):
+    _sin_instalar(monkeypatch, caplog, zip_bytes=_zip(extras=["otra-raiz/pyproject.toml"]))
+
+
+def test_actualizar_zip_roto(monkeypatch, como_uv_tool, caplog):
+    _sin_instalar(monkeypatch, caplog, zip_bytes=b"esto no es un zip")
+
+
+def test_actualizar_zip_demasiado_grande(monkeypatch, como_uv_tool, caplog):
+    monkeypatch.setattr(actualizar, "_TAMANO_MAXIMO_ZIP", 100)
+    _sin_instalar(monkeypatch, caplog, zip_bytes=_zip())  # pesa más de 100 bytes
+
+
+def test_actualizar_zip_anuncia_tamano_excesivo(monkeypatch, como_uv_tool, caplog):
+    leido = []
+
+    class Enorme(_RespuestaConCabeceras):
+        def read(self, *args):
+            leido.append(True)
+            return super().read(*args)
+
+    respuesta = Enorme(_zip(), {"Content-Length": str(300 * 1024 * 1024)})
+    _sin_instalar(monkeypatch, caplog, zip_bytes=respuesta)
+    assert not leido  # ni empieza a bajarlo
 
 
 def test_actualizar_windows(monkeypatch, como_uv_tool):
     monkeypatch.setattr(sys, "platform", "win32")
-    lanzados = []
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    monkeypatch.setenv("HF_TOKEN", "hf_secreto")
+    pedidas, lanzados = [], []
+    _simular_descarga(monkeypatch, pedidas=pedidas)
 
     def popen(comando, **kwargs):
         contenido = Path(comando[-1]).read_bytes()  # leer antes de que alguien lo borre
-        lanzados.append((comando, kwargs, contenido))
+        zip_ = Path(kwargs["env"]["TRANSCRIPTOR_ZIP"])
+        lanzados.append((comando, kwargs, contenido, zip_.read_bytes()))
 
     monkeypatch.setattr(actualizar.subprocess, "Popen", popen)
     monkeypatch.setattr(actualizar.subprocess, "CREATE_NEW_CONSOLE", 0x10, raising=False)
@@ -375,31 +552,51 @@ def test_actualizar_windows(monkeypatch, como_uv_tool):
                         lambda *a, **k: pytest.fail("en Windows no se corre uv desde aquí"))
 
     assert actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=lambda *_: None) == "reiniciar_aparte"
-    comando, kwargs, contenido = lanzados[0]
-    assert comando[:5] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+    # La descarga y la revisión se hicieron aquí, antes de abrir la ventana
+    assert [p[0] for p in pedidas] == [_URL_API_V2, _URL_ZIP]
+    comando, kwargs, contenido, zip_bytes = lanzados[0]
+    assert zip_bytes == _zip()
+    # Ruta completa: un powershell.exe en la carpeta actual no se usa
+    assert comando[:5] == [r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                           "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
     assert comando[5].endswith(".ps1")
-    contenido.decode("ascii")  # solo ASCII: no lanza
-    texto = contenido.decode("ascii")
-    assert "Wait-Process" in texto and "TRANSCRIPTOR_PID" in texto
-    assert "Read-Host" in texto and "Invoke-WebRequest -UseBasicParsing" in texto
-    assert "Tls12" in texto and "SilentlyContinue" in texto
+    texto = contenido.decode("ascii")  # solo ASCII: no lanza
+    assert "Wait-Process" in texto and "TRANSCRIPTOR_PID" in texto and "TRANSCRIPTOR_ZIP" in texto
+    assert "Read-Host" in texto
     assert "& $env:TRANSCRIPTOR_UV tool install --force --upgrade --reinstall-package transcriptor-pro --python 3.11 $Paquete" in texto
+    # El script ya no descarga nada por su cuenta
+    assert "Invoke-WebRequest" not in texto and "archive/refs/heads" not in texto
+    assert "TRANSCRIPTOR_RAMA" not in texto and "TRANSCRIPTOR_REPO" not in texto
     # Los datos no van pegados en el script.
-    assert "v2" not in texto and "/ruta/uv" not in texto
+    assert "v2" not in texto and "/ruta/uv" not in texto and _SHA not in texto
     entorno = kwargs["env"]
-    assert entorno["TRANSCRIPTOR_RAMA"] == "v2"
+    zip_ruta = Path(entorno["TRANSCRIPTOR_ZIP"])
+    assert zip_ruta.parent == Path(comando[5]).parent  # en la misma carpeta temporal que el script
+    assert zip_ruta.parent.name.startswith("transcriptor-actualizar-")  # la que el script puede borrar
     assert entorno["TRANSCRIPTOR_UV"] == "/ruta/uv"
-    assert entorno["TRANSCRIPTOR_PID"] == str(__import__("os").getpid())
-    assert entorno["TRANSCRIPTOR_REPO"] == "Mxgsr/Transcriptor-pro"
+    assert entorno["TRANSCRIPTOR_PID"] == str(os.getpid())
+    assert "TRANSCRIPTOR_RAMA" not in entorno and "TRANSCRIPTOR_REPO" not in entorno
+    assert "HF_TOKEN" not in entorno
     assert kwargs["creationflags"] == 0x10
+    shutil.rmtree(zip_ruta.parent)  # en Windows la borra el script; aquí, la prueba
+
+
+def test_actualizar_windows_rechazo_no_abre_la_ventana(monkeypatch, como_uv_tool, caplog):
+    _sin_instalar(monkeypatch, caplog, plataforma="win32", zip_bytes=_zip(version="9.9.9"))
 
 
 def test_actualizar_windows_sin_constante_usa_respaldo(monkeypatch, como_uv_tool):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.delattr(actualizar.subprocess, "CREATE_NEW_CONSOLE", raising=False)
+    _simular_descarga(monkeypatch)
     banderas = []
-    monkeypatch.setattr(actualizar.subprocess, "Popen", lambda c, **k: banderas.append(k["creationflags"]))
-    assert actualizar.actualizar(Novedad("1.0.0", "main"), salida=lambda *_: None) == "reiniciar_aparte"
+
+    def popen(comando, **kwargs):
+        banderas.append(kwargs["creationflags"])
+        shutil.rmtree(Path(comando[-1]).parent)
+
+    monkeypatch.setattr(actualizar.subprocess, "Popen", popen)
+    assert actualizar.actualizar(Novedad("2.0.0b2", "v2"), salida=lambda *_: None) == "reiniciar_aparte"
     assert banderas == [0x10]
 
 
@@ -420,4 +617,23 @@ def test_actualizar_sin_uv(monkeypatch):
     monkeypatch.setattr(actualizar, "como_se_instalo", lambda: "uv_tool")
     monkeypatch.setattr(actualizar, "buscar_uv", lambda: None)
     monkeypatch.setattr(actualizar.subprocess, "run", lambda *a, **k: pytest.fail("no debía correr"))
+    monkeypatch.setattr(actualizar.urllib.request, "urlopen", lambda *a, **k: pytest.fail("no debía bajar"))
     assert actualizar.actualizar(Novedad("1.0.0", "main"), salida=lambda *_: None) == "error"
+
+
+def test_buscar_conserva_las_preferencias_guardadas_por_otro_mientras_consulta(monkeypatch):
+    historial.guardar_preferencias(modelo="small")
+    monkeypatch.setattr(actualizar, "version_instalada", lambda: "1.0.0")
+
+    def consulta_lenta(rama, timeout=8):
+        # Mientras la red responde, el menú guarda otra preferencia
+        historial.guardar_preferencias(idioma="es", modelo="large")
+        return "1.1.0"
+
+    monkeypatch.setattr(actualizar, "version_en_github", consulta_lenta)
+    actualizar.buscar()
+
+    prefs = historial.preferencias()
+    assert prefs["idioma"] == "es" and prefs["modelo"] == "large"
+    assert prefs["actualizacion_nueva"] == "1.1.0"
+    assert isinstance(prefs["actualizacion_buscada"], float)

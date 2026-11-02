@@ -8,7 +8,11 @@ import pytest
 from typer.testing import CliRunner
 
 from src import procesador
-from src.cli import app, _duracion, _texto_hablantes
+from src.cli import app, _texto_hablantes
+
+# La clase real, guardada antes de que los tests reemplacen tempfile.TemporaryDirectory
+import tempfile
+_CarpetaReal = tempfile.TemporaryDirectory
 
 runner = CliRunner()
 
@@ -279,11 +283,11 @@ def preguntas(monkeypatch):
 
 def _procesar_diarizado(monkeypatch, tmp_path):
     audio, json_path = _transcripcion_diarizada(tmp_path)
-    from utils.formatters import cargar_json
+    from utils.formatters import cargar_transcripcion
 
     monkeypatch.setattr(procesador, "procesar_entrada", lambda *a, **k: procesador.Resultado(
         audio_path=audio, txt_path=tmp_path / "charla.blocks.txt", json_path=json_path,
-        parrafos=cargar_json(json_path), duracion=40.0))
+        parrafos=cargar_transcripcion(json_path)["parrafos"], duracion=40.0))
     return json_path
 
 
@@ -520,7 +524,9 @@ def test_nombres_con_archivo_inexistente(tmp_path):
 
 @pytest.mark.parametrize("segundos, texto", [(3, "3 s"), (108, "1 min 48 s"), (3725, "1 h 02 min")])
 def test_duracion(segundos, texto):
-    assert _duracion(segundos) == texto
+    from utils.formatters import formato_duracion
+
+    assert formato_duracion(segundos) == texto
 
 
 def test_texto_hablantes_sin_hablantes():
@@ -941,11 +947,11 @@ def test_revisar_sin_frases_dudosas(escucha, preguntas, tmp_path, capsys):
 
 
 def _procesar_con_dudosas(monkeypatch, tmp_path):
-    from utils.formatters import cargar_json
+    from utils.formatters import cargar_transcripcion
     json_path = _con_dudosas(tmp_path)
     monkeypatch.setattr(procesador, "procesar_entrada", lambda *a, **k: procesador.Resultado(
         audio_path=tmp_path / "debate.mp3", txt_path=tmp_path / "debate.blocks.txt", json_path=json_path,
-        parrafos=cargar_json(json_path), duracion=40.0))
+        parrafos=cargar_transcripcion(json_path)["parrafos"], duracion=40.0))
     return json_path
 
 
@@ -982,3 +988,217 @@ def test_sin_preguntas_no_ofrece_revisar(monkeypatch, tmp_path, escucha, pregunt
 
     assert resultado.exit_code == 0, resultado.output
     assert preguntas.hechas == []
+
+
+# --- Auditoría: continuar_sin_hablantes, errores tardíos, reproductor y texto con marcado --------------
+
+@pytest.mark.parametrize("opciones, interactivo, esperado", [
+    (["-d", "--sin-preguntas"], True, True),   # contrato del Grabador: pase lo que pase con hablantes, queda el .txt
+    (["-d"], False, True),                     # sin terminal (script): nadie a quien contarle el fallo
+    (["-d", "-n", "Ana"], True, False),        # con una persona delante el error se le muestra y decide ella
+])
+def test_pasa_continuar_sin_hablantes_segun_haya_o_no_persona(procesar, monkeypatch, opciones, interactivo, esperado):
+    import src.cli as cli
+    monkeypatch.setattr(cli, "_es_interactivo", lambda: interactivo)
+
+    resultado = runner.invoke(app, ["transcribir", "clase.mp3", *opciones])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert procesar.call_args.kwargs["continuar_sin_hablantes"] is esperado
+
+
+def test_un_fallo_tardio_no_tumba_ni_pierde_el_historial(monkeypatch, tmp_path, escucha, preguntas):
+    # P. ej. el .txt está abierto en Word y renombrar_hablantes lanza PermissionError
+    import src.cli as cli
+    from src import historial
+    _procesar_diarizado(monkeypatch, tmp_path)
+    (tmp_path / "charla.blocks.txt").write_text("[00:00:00] Hola\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_quiere_poner_nombres", lambda menu, cuantos: True)
+    monkeypatch.setattr(cli, "_escuchar_y_nombrar", lambda *a, **k: {"Hablante 1": "Ana"})
+    monkeypatch.setattr(procesador, "renombrar_hablantes", MagicMock(side_effect=PermissionError("archivo en uso")))
+
+    resultado = runner.invoke(app, ["transcribir", "charla.mp3", "-d"])
+
+    assert resultado.exit_code == 0, resultado.output
+    assert resultado.exception is None
+    assert "archivo en uso" in resultado.output or "Error" in resultado.output
+    assert "El detalle quedó guardado en" in resultado.output
+    assert cli.ultimo_error is not None
+    assert len(historial.listar()) == 1
+
+
+class _ProcesoFalso:
+    def __init__(self, registro, vivo=True, tarda=False):
+        self.registro, self.vivo, self.tarda = registro, vivo, tarda
+
+    def poll(self):
+        return None if self.vivo else 0
+
+    def wait(self, timeout=None):
+        import subprocess
+        if self.tarda and "kill" not in self.registro:
+            self.registro.append("wait-timeout")
+            raise subprocess.TimeoutExpired("afplay", timeout)
+        self.registro.append("wait")
+
+    def kill(self):
+        self.registro.append("kill")
+
+
+def test_detener_y_esperar_espera_al_proceso():
+    from src import cli
+    registro = []
+    reproductor = MagicMock()
+    reproductor.proceso = _ProcesoFalso(registro)
+    reproductor.detener.side_effect = lambda: registro.append("detener")
+
+    cli._detener_y_esperar(reproductor)
+
+    assert registro == ["detener", "wait"]
+
+
+def test_detener_y_esperar_mata_al_que_no_obedece():
+    from src import cli
+    registro = []
+    reproductor = MagicMock()
+    reproductor.proceso = _ProcesoFalso(registro, tarda=True)
+
+    cli._detener_y_esperar(reproductor)
+
+    assert registro == ["wait-timeout", "kill", "wait"]
+    cli._detener_y_esperar(None)  # sin reproductor no hace nada
+
+
+def test_revisar_dudosas_detiene_el_reproductor_antes_de_borrar_la_carpeta(escucha, preguntas, tmp_path, monkeypatch):
+    import src.cli as cli
+    registro = []
+
+    class ReproductorFalso:
+        def __init__(self, comando):
+            self.proceso = _ProcesoFalso(registro)
+
+        def reproducir(self, archivo):
+            registro.append("reproducir")
+
+        def detener(self):
+            registro.append("detener")
+
+    class CarpetaFalsa:
+        def __init__(self, *a, **k):
+            assert k.get("ignore_cleanup_errors") is True  # Windows: un borrado fallido no pierde la revisión
+            self.real = _CarpetaReal(*a, **k)
+
+        def __enter__(self):
+            return self.real.__enter__()
+
+        def __exit__(self, *a):
+            registro.append("borrar carpeta")
+            return self.real.__exit__(*a)
+
+    monkeypatch.setattr(cli.fragmentos, "Reproductor", ReproductorFalso)
+    monkeypatch.setattr(cli.tempfile, "TemporaryDirectory", CarpetaFalsa)
+    preguntas.poner("Escuchar", "Terminar la revisión")
+
+    _revisar(_con_dudosas(tmp_path))
+
+    assert registro.index("wait") < registro.index("borrar carpeta")
+    assert registro[-1] == "borrar carpeta"
+
+
+def test_escuchar_y_nombrar_detiene_el_reproductor_antes_de_borrar_la_carpeta(escucha, preguntas, tmp_path, monkeypatch):
+    import src.cli as cli
+    registro = []
+
+    class ReproductorFalso:
+        def __init__(self, comando):
+            self.proceso = _ProcesoFalso(registro)
+
+        def reproducir(self, archivo):
+            pass
+
+        def detener(self):
+            registro.append("detener")
+
+    class CarpetaFalsa:
+        def __init__(self, *a, **k):
+            assert k.get("ignore_cleanup_errors") is True
+            self.real = _CarpetaReal(*a, **k)
+
+        def __enter__(self):
+            return self.real.__enter__()
+
+        def __exit__(self, *a):
+            registro.append("borrar carpeta")
+            return self.real.__exit__(*a)
+
+    monkeypatch.setattr(cli.fragmentos, "Reproductor", ReproductorFalso)
+    monkeypatch.setattr(cli.tempfile, "TemporaryDirectory", CarpetaFalsa)
+    preguntas.poner("ESC", "ESC")
+
+    cli._escuchar_y_nombrar(_tres_hablantes()[:2], {}, tmp_path / "charla.mp3")
+
+    assert "wait" in registro and registro.index("wait") < registro.index("borrar carpeta")
+
+
+RARO = "[/]"
+OSC = "\x1b]0;titulo robado\x07"
+
+
+def test_marcado_escapa_corchetes_y_quita_controles():
+    from src import cli
+    assert cli._marcado("a [/] b") == "a \\[/] b"
+    assert "\x1b" not in cli._limpio(f"hola {OSC} mundo") and "\x07" not in cli._limpio(OSC)
+    assert cli._limpio("línea\ncon\ttab") == "línea\ncon\ttab"
+
+
+def test_el_resumen_aguanta_nombres_con_marcado_y_escapes(capsys):
+    from src import cli
+    resultado = procesador.Resultado(
+        audio_path=Path("a.mp3"), txt_path=Path(f"/tmp/{RARO} {OSC}.blocks.txt"),
+        json_path=Path(f"/tmp/{RARO}.blocks.json"),
+        parrafos=[{"start": 0, "end": 10, "text": "Hola", "speaker": f"{RARO}{OSC}"}], duracion=10.0)
+
+    cli._mostrar_resumen(resultado, 5.0)
+
+    salida = capsys.readouterr().out
+    assert "[/]" in salida and "\x1b" not in salida and "\x07" not in salida
+
+
+def test_nombrar_aguanta_texto_y_hablantes_con_marcado(escucha, preguntas):
+    from src import cli
+    parrafos = [{"start": 0, "end": 30, "text": f"Hola [/] [bold]{OSC}", "speaker": f"{RARO}{OSC}"}]
+    preguntas.poner("ESC")
+
+    assert cli._escuchar_y_nombrar(parrafos, {}, Path("charla.mp3")) == {}
+
+
+def test_nombrar_muestra_el_texto_con_corchetes_tal_cual(escucha, preguntas, capsys):
+    from src import cli
+    parrafos = [{"start": 0, "end": 30, "text": f"Hola [/] [bold]x{OSC}", "speaker": RARO}]
+    preguntas.poner("ESC")
+
+    cli._escuchar_y_nombrar(parrafos, {}, Path("charla.mp3"))
+
+    salida = capsys.readouterr().out
+    assert "Hola [/] [bold]x" in salida and "\x1b" not in salida
+
+
+def test_un_error_con_escapes_no_pasa_a_la_terminal(monkeypatch):
+    monkeypatch.setattr(procesador, "procesar_entrada", MagicMock(side_effect=ValueError(f"mal {OSC} [/]")))
+
+    resultado = runner.invoke(app, ["transcribir", "x.mp3"])
+
+    assert resultado.exit_code == 1
+    assert "\x1b" not in resultado.output and "mal" in resultado.output
+
+
+def test_dudosa_con_marcado_y_escapes(capsys):
+    from src import cli, dudosas
+    parrafos = [{"start": 0, "end": 10, "text": f"Antes [/] {OSC}", "speaker": RARO},
+                {"start": 10, "end": 20, "text": "Dijo algo. Eso sí.", "speaker": "Hablante 2"}]
+    d = dudosas.Dudosa(indice=1, texto="Eso sí.", start=15, end=20, actual="Hablante 2", otro=RARO, motivo="borde")
+
+    cli._mostrar_dudosa(parrafos, d, {}, 1, 1)
+
+    salida = capsys.readouterr().out
+    assert "[/]" in salida and "\x1b" not in salida
